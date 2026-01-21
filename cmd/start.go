@@ -5,6 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -61,6 +65,9 @@ func startMonitoring(interfaceName string, xdcOnly bool) {
 	// Define XDC ports
 	xdcPorts := []string{"30303", "30304", "30305", "30306", "30307", "30308", "30309", "30310", "30311", "30312", "30313"}
 
+	// Initialize peer data map
+	peerData := make(map[string]interface{})
+
 	for packet := range packetSource.Packets() {
 		// Parse layers
 		var srcIP, dstIP, srcPort, dstPort string
@@ -100,12 +107,20 @@ func startMonitoring(interfaceName string, xdcOnly bool) {
 
 		// Extract payload data if available
 		var data string
+		var decodedData string
 		appLayer := packet.ApplicationLayer()
 		if appLayer != nil {
 			payload := appLayer.Payload()
 			if len(payload) > 0 {
 				// Store raw hex data
 				data = hex.EncodeToString(payload)
+
+				// Attempt to decode XDC/Ethereum-style RLP data
+				decoded := decodeXDCData(payload)
+				if decoded != "" {
+					decodedData = decoded
+				}
+
 				if len(data) > 100 {
 					data = data[:100] + "... (truncated)"
 				}
@@ -122,6 +137,7 @@ func startMonitoring(interfaceName string, xdcOnly bool) {
 			"protocol":  protocol,
 			"is_xdc":    isXDC,
 			"data":      data,
+			"decoded_data": decodedData,
 			"size":      len(packet.Data()),
 		}
 
@@ -133,6 +149,86 @@ func startMonitoring(interfaceName string, xdcOnly bool) {
 		}
 
 		fmt.Println(string(jsonData))
+
+		// Update peer data for storage
+		updatePeerData(&peerData, srcIP, dstIP, protocol, decodedData)
+
+		// Save peer data to file periodically
+		savePeerDataToFile(peerData)
+	}
+}
+
+// updatePeerData updates the peer data map with new information
+func updatePeerData(peerData *map[string]interface{}, srcIP, dstIP, protocol, decodedData string) {
+	// Update both source and destination IPs
+	updateSinglePeer(peerData, srcIP, protocol, decodedData)
+	updateSinglePeer(peerData, dstIP, protocol, decodedData)
+}
+
+// updateSinglePeer updates data for a single peer
+func updateSinglePeer(peerData *map[string]interface{}, ip, protocol, decodedData string) {
+	if ip == "" {
+		return
+	}
+
+	// Get or create peer info
+	peerInfo, exists := (*peerData)[ip]
+	if !exists {
+		peerInfo = make(map[string]interface{})
+		(*peerData)[ip] = peerInfo
+	}
+
+	peerMap := peerInfo.(map[string]interface{})
+
+	// Update last seen timestamp
+	peerMap["last_seen"] = time.Now()
+
+	// Update message count
+	count, ok := peerMap["total_messages"].(int)
+	if !ok {
+		count = 0
+	}
+	peerMap["total_messages"] = count + 1
+
+	// Update protocol count
+	protocolCounts, ok := peerMap["protocols"].(map[string]int)
+	if !ok {
+		protocolCounts = make(map[string]int)
+		peerMap["protocols"] = protocolCounts
+	}
+	protocolCounts[protocol]++
+
+	// Update message type count if we have decoded data
+	if decodedData != "" {
+		messageTypes, ok := peerMap["message_types"].(map[string]int)
+		if !ok {
+			messageTypes = make(map[string]int)
+			peerMap["message_types"] = messageTypes
+		}
+		messageTypes[decodedData]++
+	}
+}
+
+// savePeerDataToFile saves the peer data to the file
+func savePeerDataToFile(peerData map[string]interface{}) {
+	peerdDir, err := getPeerdDir()
+	if err != nil {
+		log.Printf("Error getting .peerd directory: %v", err)
+		return
+	}
+
+	dataFile := filepath.Join(peerdDir, "peer-data.json")
+
+	// Marshal the data
+	jsonData, err := json.MarshalIndent(peerData, "", "  ")
+	if err != nil {
+		log.Printf("Error marshaling peer data: %v", err)
+		return
+	}
+
+	// Write to file
+	if err := os.WriteFile(dataFile, jsonData, 0644); err != nil {
+		log.Printf("Error writing peer data to file: %v", err)
 	}
 }
 
@@ -143,4 +239,46 @@ func isXDCPort(port string, xdcPorts []string) bool {
 		}
 	}
 	return false
+}
+
+// decodeXDCData attempts to decode XDC/Ethereum-style data
+func decodeXDCData(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+
+	// Check for common Ethereum/XDC protocol signatures
+	// This is a simplified decoder - in reality, you'd need more sophisticated parsing
+
+	// Check for devp2p handshake (starts with 0x22 - Hello message length)
+	if len(data) >= 1 && data[0] == 0x22 {
+		return "DevP2P Hello Message"
+	}
+
+	// Check for RLP-encoded data (common in Ethereum protocols)
+	if len(data) >= 1 {
+		firstByte := data[0]
+		// RLP length prefixes: 0x80-0xb7 for short data, 0xb8-0xbf for long data
+		if (firstByte >= 0x80 && firstByte <= 0xb7) || (firstByte >= 0xb8 && firstByte <= 0xbf) {
+			return "RLP Encoded Data"
+		}
+	}
+
+	// Check for common protocol IDs in XDC
+	if len(data) >= 3 {
+		// Look for common protocol identifiers
+		if string(data[:3]) == "ETH" || string(data[:3]) == "XDC" {
+			return "XDC Protocol Data"
+		}
+	}
+
+	// Check for readable strings that might be XDC-related
+	dataStr := string(data)
+	if strings.Contains(strings.ToLower(dataStr), "xdc") ||
+	   strings.Contains(strings.ToLower(dataStr), "xinfin") ||
+	   strings.Contains(dataStr, "enode://") {
+		return "XDC Protocol String Data"
+	}
+
+	return ""
 }
