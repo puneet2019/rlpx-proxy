@@ -26,24 +26,22 @@ var startCmd = &cobra.Command{
 			return
 		}
 
-		interfaceName, _ := cmd.Flags().GetString("interface")
 		xdcOnly, _ := cmd.Flags().GetBool("xdc-only")
 
-		startMonitoring(interfaceName, xdcOnly)
+		startMonitoring(xdcOnly)
 	},
 }
 
 func init() {
-	startCmd.Flags().String("interface", "en0", "Network interface to capture from")
 	startCmd.Flags().Bool("xdc-only", false, "Log only XDC traffic")
 	rootCmd.AddCommand(startCmd)
 }
 
-func startMonitoring(interfaceName string, xdcOnly bool) {
-	// Open the device for packet capture
-	handle, err := pcap.OpenLive(interfaceName, 1600, true, pcap.BlockForever)
+func startMonitoring(xdcOnly bool) {
+	// Open the device for packet capture on any interface
+	handle, err := pcap.OpenLive("any", 1600, true, pcap.BlockForever)
 	if err != nil {
-		log.Fatal("Failed to open device ", interfaceName, ": ", err)
+		log.Fatal("Failed to open device any: ", err)
 	}
 	defer handle.Close()
 
@@ -53,7 +51,7 @@ func startMonitoring(interfaceName string, xdcOnly bool) {
 		log.Fatal("Failed to set BPF filter: ", err)
 	}
 
-	fmt.Printf("Starting XDC packet capture on interface %s...\n", interfaceName)
+	fmt.Printf("Starting XDC packet capture on any interface...\n")
 	if xdcOnly {
 		fmt.Println("Monitoring only XDC traffic...")
 	} else {
