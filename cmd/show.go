@@ -34,7 +34,7 @@ func showPeerData(format string) {
 	}
 
 	dataFile := filepath.Join(peerdDir, "peer-data.json")
-	
+
 	// Read the data file
 	data, err := ioutil.ReadFile(dataFile)
 	if err != nil {
@@ -42,19 +42,19 @@ func showPeerData(format string) {
 		fmt.Println("Run 'peer-sniffer start' first to collect data")
 		return
 	}
-	
+
 	if format == "json" {
 		fmt.Println(string(data))
 		return
 	}
-	
+
 	// Parse and display as table
 	var peerData map[string]interface{}
 	if err := json.Unmarshal(data, &peerData); err != nil {
 		fmt.Printf("Error parsing peer data: %v\n", err)
 		return
 	}
-	
+
 	displayPeerTable(peerData)
 }
 

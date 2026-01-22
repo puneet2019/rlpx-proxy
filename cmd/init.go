@@ -62,7 +62,7 @@ func initializePeerdDir(force bool) {
 
 	if !configExists {
 		defaultConfig := `{
-  "interface": "en0",
+  "interface": "any",
   "log_xdc_only": false,
   "xdc_nodes": [],
   "xdc_ports": [
