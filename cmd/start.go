@@ -106,7 +106,7 @@ func startMonitoring(xdcOnly bool) {
 				data = hex.EncodeToString(payload)
 
 				// Check if this is XDC traffic using magic bytes
-				isXDCResult = isXDC(payload)
+				isXDCResult, _ := isXDC(payload)
 
 				// Skip non-XDC traffic if xdc-only is enabled
 				if xdcOnly && !isXDCResult {
@@ -235,15 +235,6 @@ func savePeerDataToFile(peerData map[string]interface{}) {
 	}
 }
 
-func isXDCPort(port string, xdcPorts []string) bool {
-	for _, xdcPort := range xdcPorts {
-		if port == xdcPort {
-			return true
-		}
-	}
-	return false
-}
-
 // decodeXDCData attempts to decode XDC/Ethereum-style data
 func decodeXDCData(data []byte) string {
 	if len(data) == 0 {
@@ -275,30 +266,121 @@ func decodeXDCData(data []byte) string {
 		}
 	}
 
-	// Check for readable strings that might be XDC-related
-	dataStr := string(data)
-	if strings.Contains(strings.ToLower(dataStr), "xdc") ||
-		strings.Contains(strings.ToLower(dataStr), "xinfin") ||
-		strings.Contains(dataStr, "enode://") {
-		return "XDC Protocol String Data"
-	}
-
 	return ""
 }
 
-// isXDC checks if the payload data is XDC traffic using magic bytes
-func isXDC(payload []byte) bool {
-	// TODO: Implement actual XDC protocol detection based on magic bytes
-	// This is a placeholder function that will be implemented to check for XDC-specific signatures
+// XDCPacketType represents the type of XDC packet
+type XDCPacketType string
 
-	// For now, return false to capture all traffic
-	// In the future, this will check for XDC protocol signatures like:
-	// - Specific handshake patterns
-	// - RLP encoding patterns
-	// - XDC-specific protocol headers
-	// - Magic bytes at the beginning of packets
-	// - etc.
+const (
+	ConnectionRequest XDCPacketType = "connection_request"
+	Disconnect        XDCPacketType = "disconnect"
+	MessagePassing    XDCPacketType = "message_passing"
+	PingPong          XDCPacketType = "ping_pong"
+	Unknown           XDCPacketType = "unknown"
+)
 
-	// Placeholder implementation - will be replaced with actual detection
-	return true // For now, treat all traffic as XDC for testing
+// XDCPacketInfo contains information about the XDC packet
+type XDCPacketInfo struct {
+	Type    XDCPacketType
+	Details string
+}
+
+// isXDC checks if the payload data is XDC traffic using magic bytes and returns packet info
+func isXDC(payload []byte) (bool, XDCPacketInfo) {
+	if len(payload) == 0 {
+		return false, XDCPacketInfo{Type: Unknown, Details: "Empty payload"}
+	}
+
+	// Check for devp2p handshake (starts with 0x22 - Hello message length)
+	if len(payload) >= 1 && payload[0] == 0x22 {
+		return true, XDCPacketInfo{Type: ConnectionRequest, Details: "DevP2P Hello Message"}
+	}
+
+	// Check for RLP-encoded data (common in Ethereum protocols)
+	if len(payload) >= 1 {
+		firstByte := payload[0]
+		// RLP length prefixes: 0x80-0xbf for strings/lists
+		if firstByte >= 0x80 && firstByte <= 0xbf {
+			// Check for common XDC protocol message types
+			if len(payload) >= 2 {
+				secondByte := payload[1]
+				switch secondByte {
+				case 0x00: // Hello
+					return true, XDCPacketInfo{Type: ConnectionRequest, Details: "Hello Message"}
+				case 0x01: // Disconnect
+					return true, XDCPacketInfo{Type: Disconnect, Details: "Disconnect Message"}
+				case 0x02: // Ping
+					return true, XDCPacketInfo{Type: PingPong, Details: "Ping Message"}
+				case 0x03: // Pong
+					return true, XDCPacketInfo{Type: PingPong, Details: "Pong Message"}
+				case 0x0a: // Transactions
+					return true, XDCPacketInfo{Type: MessagePassing, Details: "Transaction Message"}
+				case 0x0b: // GetBlockHashes
+					return true, XDCPacketInfo{Type: MessagePassing, Details: "GetBlockHashes Message"}
+				case 0x0c: // BlockHashes
+					return true, XDCPacketInfo{Type: MessagePassing, Details: "BlockHashes Message"}
+				case 0x0d: // GetBlocks
+					return true, XDCPacketInfo{Type: MessagePassing, Details: "GetBlocks Message"}
+				case 0x0e: // Blocks
+					return true, XDCPacketInfo{Type: MessagePassing, Details: "Blocks Message"}
+				case 0x10: // NewBlock
+					return true, XDCPacketInfo{Type: MessagePassing, Details: "NewBlock Message"}
+				case 0x11: // NewBlockHashes
+					return true, XDCPacketInfo{Type: MessagePassing, Details: "NewBlockHashes Message"}
+				}
+			}
+			return true, XDCPacketInfo{Type: MessagePassing, Details: "RLP Encoded Data"}
+		}
+	}
+
+	// Check for common protocol IDs in XDC
+	if len(payload) >= 3 {
+		// Look for common protocol identifiers
+		if string(payload[:3]) == "ETH" || string(payload[:3]) == "XDC" {
+			return true, XDCPacketInfo{Type: MessagePassing, Details: "XDC Protocol Data"}
+		}
+	}
+
+	// Check for readable strings that might be XDC-related
+	payloadStr := string(payload)
+	if strings.Contains(strings.ToLower(payloadStr), "xdc") ||
+		strings.Contains(strings.ToLower(payloadStr), "xinfin") ||
+		strings.Contains(payloadStr, "enode://") {
+		return true, XDCPacketInfo{Type: MessagePassing, Details: "XDC Protocol String Data"}
+	}
+
+	// Check for DiscV5 discovery protocol signatures (used by XDC)
+	if len(payload) >= 65 { // Minimum size for a DiscV5 packet
+		// DiscV5 packets have a 32-byte signature followed by packet type
+		// The signature is ECDSA over the packet data
+		// Common packet types: PING (0x01), PONG (0x02), FINDNODE (0x03), NODES (0x04)
+		packetType := payload[32]
+		switch packetType {
+		case 0x01:
+			return true, XDCPacketInfo{Type: MessagePassing, Details: "DiscV5 PING Message"}
+		case 0x02:
+			return true, XDCPacketInfo{Type: MessagePassing, Details: "DiscV5 PONG Message"}
+		case 0x03:
+			return true, XDCPacketInfo{Type: MessagePassing, Details: "DiscV5 FINDNODE Message"}
+		case 0x04:
+			return true, XDCPacketInfo{Type: MessagePassing, Details: "DiscV5 NODES Message"}
+		}
+	}
+
+	// Check for hex patterns that might indicate blockchain data
+	// This is a heuristic approach
+	hexCount := 0
+	for _, b := range payload {
+		if (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F') {
+			hexCount++
+		}
+	}
+
+	// If a high percentage of the payload looks like hex, it might be blockchain data
+	if float32(hexCount)/float32(len(payload)) > 0.7 {
+		return true, XDCPacketInfo{Type: MessagePassing, Details: "Hex-encoded Blockchain Data"}
+	}
+
+	return false, XDCPacketInfo{Type: Unknown, Details: "Not XDC traffic"}
 }
