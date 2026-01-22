@@ -60,9 +60,6 @@ func startMonitoring(xdcOnly bool) {
 
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 
-	// Define XDC ports
-	xdcPorts := []string{"30303", "30304", "30305", "30306", "30307", "30308", "30309", "30310", "30311", "30312", "30313"}
-
 	// Initialize peer data map
 	peerData := make(map[string]interface{})
 
@@ -97,21 +94,24 @@ func startMonitoring(xdcOnly bool) {
 			}
 		}
 
-		// Check if this is XDC traffic by checking ports
-		isXDC := isXDCPort(dstPort, xdcPorts) || isXDCPort(srcPort, xdcPorts)
-		if xdcOnly && !isXDC {
-			continue // Skip non-XDC traffic if xdc-only is enabled
-		}
-
 		// Extract payload data if available
 		var data string
 		var decodedData string
+		var isXDCResult bool
 		appLayer := packet.ApplicationLayer()
 		if appLayer != nil {
 			payload := appLayer.Payload()
 			if len(payload) > 0 {
 				// Store raw hex data
 				data = hex.EncodeToString(payload)
+
+				// Check if this is XDC traffic using magic bytes
+				isXDCResult = isXDC(payload)
+
+				// Skip non-XDC traffic if xdc-only is enabled
+				if xdcOnly && !isXDCResult {
+					continue
+				}
 
 				// Attempt to decode XDC/Ethereum-style RLP data
 				decoded := decodeXDCData(payload)
@@ -123,20 +123,25 @@ func startMonitoring(xdcOnly bool) {
 					data = data[:100] + "... (truncated)"
 				}
 			}
+		} else {
+			// If no application layer, check if xdcOnly is enabled
+			if xdcOnly {
+				continue // Skip if no payload to check
+			}
 		}
 
 		// Create a packet info structure
 		packetInfo := map[string]interface{}{
-			"timestamp": packet.Metadata().Timestamp,
-			"src_ip":    srcIP,
-			"dst_ip":    dstIP,
-			"src_port":  srcPort,
-			"dst_port":  dstPort,
-			"protocol":  protocol,
-			"is_xdc":    isXDC,
-			"data":      data,
+			"timestamp":    packet.Metadata().Timestamp,
+			"src_ip":       srcIP,
+			"dst_ip":       dstIP,
+			"src_port":     srcPort,
+			"dst_port":     dstPort,
+			"protocol":     protocol,
+			"is_xdc":       isXDCResult,
+			"data":         data,
 			"decoded_data": decodedData,
-			"size":      len(packet.Data()),
+			"size":         len(packet.Data()),
 		}
 
 		// Log the packet info as JSON
@@ -273,10 +278,27 @@ func decodeXDCData(data []byte) string {
 	// Check for readable strings that might be XDC-related
 	dataStr := string(data)
 	if strings.Contains(strings.ToLower(dataStr), "xdc") ||
-	   strings.Contains(strings.ToLower(dataStr), "xinfin") ||
-	   strings.Contains(dataStr, "enode://") {
+		strings.Contains(strings.ToLower(dataStr), "xinfin") ||
+		strings.Contains(dataStr, "enode://") {
 		return "XDC Protocol String Data"
 	}
 
 	return ""
+}
+
+// isXDC checks if the payload data is XDC traffic using magic bytes
+func isXDC(payload []byte) bool {
+	// TODO: Implement actual XDC protocol detection based on magic bytes
+	// This is a placeholder function that will be implemented to check for XDC-specific signatures
+
+	// For now, return false to capture all traffic
+	// In the future, this will check for XDC protocol signatures like:
+	// - Specific handshake patterns
+	// - RLP encoding patterns
+	// - XDC-specific protocol headers
+	// - Magic bytes at the beginning of packets
+	// - etc.
+
+	// Placeholder implementation - will be replaced with actual detection
+	return true // For now, treat all traffic as XDC for testing
 }
