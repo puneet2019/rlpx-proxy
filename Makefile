@@ -74,59 +74,6 @@ clean: ## Remove build artifacts
 	rm -rf $(BUILD_DIR)
 	@echo "Clean completed"
 
-# Dockerfile target (to create Dockerfile if it doesn't exist)
-Dockerfile:
-	@echo "Creating Dockerfile..."
-	@echo 'FROM golang:1.19-alpine AS builder' > Dockerfile
-	@echo '' >> Dockerfile
-	@echo '# Install build dependencies' >> Dockerfile
-	@echo 'RUN apk add --no-cache git build-base linux-headers libpcap-dev' >> Dockerfile
-	@echo '' >> Dockerfile
-	@echo '# Set working directory' >> Dockerfile
-	@echo 'WORKDIR /app' >> Dockerfile
-	@echo '' >> Dockerfile
-	@echo '# Copy go mod files' >> Dockerfile
-	@echo 'COPY go.mod go.sum ./' >> Dockerfile
-	@echo '' >> Dockerfile
-	@echo '# Download dependencies' >> Dockerfile
-	@echo 'RUN go mod download' >> Dockerfile
-	@echo '' >> Dockerfile
-	@echo '# Copy source code' >> Dockerfile
-	@echo 'COPY . .' >> Dockerfile
-	@echo '' >> Dockerfile
-	@echo '# Build the application' >> Dockerfile
-	@echo 'RUN go build -o peer-sniffer ./cmd/peer-sniffer' >> Dockerfile
-	@echo '' >> Dockerfile
-	@echo 'FROM alpine:latest' >> Dockerfile
-	@echo '' >> Dockerfile
-	@echo '# Install runtime dependencies' >> Dockerfile
-	@echo 'RUN apk --no-cache add ca-certificates libpcap-dev' >> Dockerfile
-	@echo '' >> Dockerfile
-	@echo '# Create non-root user' >> Dockerfile
-	@echo 'RUN addgroup -g 65532 nonroot && \\' >> Dockerfile
-	@echo '    adduser -D -u 65532 -G nonroot nonroot' >> Dockerfile
-	@echo '' >> Dockerfile
-	@echo '# Set working directory' >> Dockerfile
-	@echo 'WORKDIR /root/' >> Dockerfile
-	@echo '' >> Dockerfile
-	@echo '# Copy the binary from builder stage' >> Dockerfile
-	@echo 'COPY --from=builder /app/peer-sniffer .' >> Dockerfile
-	@echo '' >> Dockerfile
-	@echo '# Change ownership to non-root user' >> Dockerfile
-	@echo 'RUN chown -R nonroot:nonroot /root/' >> Dockerfile
-	@echo '' >> Dockerfile
-	@echo '# Switch to non-root user' >> Dockerfile
-	@echo 'USER nonroot' >> Dockerfile
-	@echo '' >> Dockerfile
-	@echo '# Expose port (not typically used for packet capture)' >> Dockerfile
-	@echo 'EXPOSE 8080' >> Dockerfile
-	@echo '' >> Dockerfile
-	@echo '# Run the application' >> Dockerfile
-	@echo 'CMD ["./peer-sniffer", "start"]' >> Dockerfile
-
-# Create Dockerfile if it doesn't exist
-dockerfile: Dockerfile
-
 # Development target to run without installing
 dev: build
 	@echo "Running in development mode..."

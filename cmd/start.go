@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/google/gopacket"
@@ -65,7 +65,8 @@ func startMonitoring(xdcOnly bool) {
 
 	for packet := range packetSource.Packets() {
 		// Parse layers
-		var srcIP, dstIP, srcPort, dstPort string
+		var srcIP, dstIP string
+		var srcPort, dstPort string
 		var protocol string
 
 		networkLayer := packet.NetworkLayer()
@@ -84,19 +85,19 @@ func startMonitoring(xdcOnly bool) {
 		if transportLayer != nil {
 			switch layer := transportLayer.(type) {
 			case *layers.TCP:
-				srcPort = fmt.Sprintf("%d", layer.SrcPort)
-				dstPort = fmt.Sprintf("%d", layer.DstPort)
+				srcPort = layer.SrcPort.String()
+				dstPort = layer.DstPort.String()
 				protocol = "TCP"
 			case *layers.UDP:
-				srcPort = fmt.Sprintf("%d", layer.SrcPort)
-				dstPort = fmt.Sprintf("%d", layer.DstPort)
+				srcPort = layer.SrcPort.String()
+				dstPort = layer.DstPort.String()
 				protocol = "UDP"
 			}
 		}
 
 		// Extract payload data if available
 		var data string
-		var decodedData string
+		var resp XDCPacketInfo
 		var isXDCResult bool
 		appLayer := packet.ApplicationLayer()
 		if appLayer != nil {
@@ -106,40 +107,34 @@ func startMonitoring(xdcOnly bool) {
 				data = hex.EncodeToString(payload)
 
 				// Analyze XDC payload to detect traffic and decode
-				isXDCResult, _, decoded := analyzeXDCPayload(payload)
+				// The function will check both srcPort and dstPort for XDC range (30000-65535)
+				// It will also consider localhost connections when determining XDC traffic
+				isXDCResult, resp = analyzeXDCPayloadSafe(payload, srcIP, dstIP, srcPort, dstPort, protocol)
 
 				// Skip non-XDC traffic if xdc-only is enabled
-				if xdcOnly && !isXDCResult {
+				if !isXDCResult {
 					continue
-				}
-
-				if decoded != "" {
-					decodedData = decoded
 				}
 
 				if len(data) > 100 {
 					data = data[:100] + "... (truncated)"
 				}
 			}
-		} else {
-			// If no application layer, check if xdcOnly is enabled
-			if xdcOnly {
-				continue // Skip if no payload to check
-			}
 		}
 
 		// Create a packet info structure
 		packetInfo := map[string]interface{}{
-			"timestamp":    packet.Metadata().Timestamp,
-			"src_ip":       srcIP,
-			"dst_ip":       dstIP,
-			"src_port":     srcPort,
-			"dst_port":     dstPort,
-			"protocol":     protocol,
-			"is_xdc":       isXDCResult,
-			"data":         data,
-			"decoded_data": decodedData,
-			"size":         len(packet.Data()),
+			"timestamp": packet.Metadata().Timestamp,
+			"src_ip":    srcIP,
+			"dst_ip":    dstIP,
+			"src_port":  srcPort,
+			"dst_port":  dstPort,
+			"protocol":  protocol,
+			"is_xdc":    isXDCResult,
+			"details":   resp.Details,
+			"type":      resp.Type,
+			"data":      data,
+			"size":      len(packet.Data()),
 		}
 
 		// Log the packet info as JSON
@@ -149,10 +144,16 @@ func startMonitoring(xdcOnly bool) {
 			continue
 		}
 
-		fmt.Println(string(jsonData))
+		if xdcOnly {
+			if isXDCResult {
+				fmt.Println(string(jsonData))
+			}
+		} else {
+			fmt.Println(string(jsonData))
+		}
 
 		// Update peer data for storage
-		updatePeerData(&peerData, srcIP, dstIP, protocol, decodedData)
+		updatePeerData(&peerData, srcIP, dstIP, protocol, resp.Details)
 
 		// Save peer data to file periodically
 		savePeerDataToFile(peerData)
@@ -233,119 +234,199 @@ func savePeerDataToFile(peerData map[string]interface{}) {
 	}
 }
 
-
-// XDCPacketType represents the type of XDC packet
 type XDCPacketType string
 
 const (
-	ConnectionRequest XDCPacketType = "connection_request"
-	Disconnect        XDCPacketType = "disconnect"
-	MessagePassing    XDCPacketType = "message_passing"
-	PingPong          XDCPacketType = "ping_pong"
-	Unknown           XDCPacketType = "unknown"
+	Unknown         XDCPacketType = "Unknown"
+	DevP2PHandshake               = "DevP2PHandshake"
+	DiscV4                        = "DiscV4"
+	DiscV5                        = "DiscV5"
+	EncryptedRLPx                 = "EncryptedRLPx"
 )
 
-// XDCPacketInfo contains information about the XDC packet
 type XDCPacketInfo struct {
-	Type    XDCPacketType
-	Details string
+	Type     XDCPacketType
+	Details  string
+	PeerIP   string
+	PeerPort string
+	PeerID   string // only populated if cryptographically verifiable
 }
 
-// analyzeXDCPayload analyzes the payload data to detect XDC traffic and decode it
-func analyzeXDCPayload(payload []byte) (bool, XDCPacketInfo, string) {
+func analyzeXDCPayloadSafe(
+	payload []byte,
+	srcIP string,
+	dstIP string,
+	srcPort string,
+	dstPort string,
+	protocol string,
+) (bool, XDCPacketInfo) {
+
 	if len(payload) == 0 {
-		return false, XDCPacketInfo{Type: Unknown, Details: "Empty payload"}, ""
+		return false, XDCPacketInfo{Type: Unknown, Details: "empty payload"}
 	}
 
-	// Check for devp2p handshake (starts with 0x22 - Hello message length)
-	if len(payload) >= 1 && payload[0] == 0x22 {
-		return true, XDCPacketInfo{Type: ConnectionRequest, Details: "DevP2P Hello Message"}, "DevP2P Hello Message"
+	// Parse the source and destination ports to integers
+	srcPortInt := parseIntPort(srcPort)
+	dstPortInt := parseIntPort(dstPort)
+
+	// Check if either endpoint is a local IP
+	isSrcLocal := isLocalIP(srcIP)
+	isDstLocal := isLocalIP(dstIP)
+
+	// Check if either port is in XDC range (30000-65535)
+	var isInXDPortRange bool
+
+	if isSrcLocal {
+		// If source is local, only check destination port
+		isInXDPortRange = dstPortInt >= 30000 && dstPortInt <= 65535
+	} else if isDstLocal {
+		// If destination is local, only check source port
+		isInXDPortRange = srcPortInt >= 30000 && srcPortInt <= 65535
+	} else {
+		// Both endpoints are external, check both ports
+		isInXDPortRange = (srcPortInt >= 30000 && srcPortInt <= 65535) ||
+			(dstPortInt >= 30000 && dstPortInt <= 65535)
 	}
 
-	// Check for RLP-encoded data (common in Ethereum protocols)
-	if len(payload) >= 1 {
-		firstByte := payload[0]
-		// RLP length prefixes: 0x80-0xbf for strings/lists
-		if firstByte >= 0x80 && firstByte <= 0xbf {
-			// Check for common XDC protocol message types
-			if len(payload) >= 2 {
-				secondByte := payload[1]
-				switch secondByte {
-				case 0x00: // Hello
-					return true, XDCPacketInfo{Type: ConnectionRequest, Details: "Hello Message"}, "XDC Hello Message"
-				case 0x01: // Disconnect
-					return true, XDCPacketInfo{Type: Disconnect, Details: "Disconnect Message"}, "XDC Disconnect Message"
-				case 0x02: // Ping
-					return true, XDCPacketInfo{Type: PingPong, Details: "Ping Message"}, "XDC Ping Message"
-				case 0x03: // Pong
-					return true, XDCPacketInfo{Type: PingPong, Details: "Pong Message"}, "XDC Pong Message"
-				case 0x0a: // Transactions
-					return true, XDCPacketInfo{Type: MessagePassing, Details: "Transaction Message"}, "XDC Transaction Message"
-				case 0x0b: // GetBlockHashes
-					return true, XDCPacketInfo{Type: MessagePassing, Details: "GetBlockHashes Message"}, "XDC GetBlockHashes Message"
-				case 0x0c: // BlockHashes
-					return true, XDCPacketInfo{Type: MessagePassing, Details: "BlockHashes Message"}, "XDC BlockHashes Message"
-				case 0x0d: // GetBlocks
-					return true, XDCPacketInfo{Type: MessagePassing, Details: "GetBlocks Message"}, "XDC GetBlocks Message"
-				case 0x0e: // Blocks
-					return true, XDCPacketInfo{Type: MessagePassing, Details: "Blocks Message"}, "XDC Blocks Message"
-				case 0x10: // NewBlock
-					return true, XDCPacketInfo{Type: MessagePassing, Details: "NewBlock Message"}, "XDC NewBlock Message"
-				case 0x11: // NewBlockHashes
-					return true, XDCPacketInfo{Type: MessagePassing, Details: "NewBlockHashes Message"}, "XDC NewBlockHashes Message"
+	// If not in XDC port range, return false early
+	if !isInXDPortRange {
+		return false, XDCPacketInfo{Type: Unknown, Details: "port not in XDC range (30000-65535)"}
+	}
+
+	// --- 1. DevP2P ECIES handshake (unencrypted) ---
+	// Auth / Ack packets are fixed-size-ish and NOT random
+	// They always begin with ECIES data, not ASCII or RLP
+	if looksLikeDevP2PHandshake(payload) {
+		return true, XDCPacketInfo{
+			Type:     DevP2PHandshake,
+			Details:  "DevP2P ECIES handshake",
+			PeerIP:   srcIP,
+			PeerPort: srcPort,
+			PeerID:   "",
+		}
+	}
+
+	// --- 2. Discovery v5 (cryptographically signed UDP packets) ---
+	if looksLikeDiscV5(payload) {
+		return true, XDCPacketInfo{
+			Type:     DiscV5,
+			Details:  "Discovery v5 packet",
+			PeerIP:   srcIP,
+			PeerPort: srcPort,
+			PeerID:   "",
+		}
+	}
+
+	// --- 3. Discovery v4 ---
+	if looksLikeDiscV4(payload) {
+		return true, XDCPacketInfo{
+			Type:     DiscV4,
+			Details:  "Discovery v4 packet",
+			PeerIP:   srcIP,
+			PeerPort: srcPort,
+			PeerID:   "",
+		}
+	}
+
+	// --- 4. Everything else is encrypted RLPx ---
+	// We DO NOT attempt to decode it
+
+	return protocol == "TCP", XDCPacketInfo{
+		Type:     EncryptedRLPx,
+		Details:  "Encrypted RLPx frame (opaque)",
+		PeerIP:   srcIP,
+		PeerPort: srcPort,
+		PeerID:   "",
+	}
+}
+
+func looksLikeDevP2PHandshake(b []byte) bool {
+	// ECIES auth / ack sizes are predictable-ish
+	// Auth ≈ 194 bytes, Ack ≈ 97 bytes (varies slightly)
+	if len(b) < 90 || len(b) > 300 {
+		return false
+	}
+
+	// Without entropy check, we rely on size alone for now
+	// Could add other heuristics later if needed
+	return true
+}
+
+func looksLikeDiscV5(b []byte) bool {
+	// DiscV5: 32-byte hash + signature + packet-type
+	if len(b) < 63 {
+		return false
+	}
+	return isValidDiscV5PacketType(b[32])
+}
+
+func looksLikeDiscV4(b []byte) bool {
+	// DiscV4 packets are signed
+	if len(b) < 98 {
+		return false
+	}
+	// Without entropy check, we rely on size alone for now
+	// Could add other heuristics later if needed
+	return true
+}
+
+func isValidDiscV5PacketType(t byte) bool {
+	switch t {
+	case 0x01, 0x02, 0x03, 0x04, 0x05:
+		return true
+	default:
+		return false
+	}
+}
+
+// parseIntPort converts a port string to an integer
+func parseIntPort(portStr string) int {
+	var port int
+	fmt.Sscanf(portStr, "%d", &port)
+	return port
+}
+
+// isLocalIP checks if an IP address belongs to any of the local network interfaces
+func isLocalIP(ipAddr string) bool {
+	// Parse the IP address
+	ip := net.ParseIP(ipAddr)
+	if ip == nil {
+		return false
+	}
+
+	// Get all network interfaces
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+
+	// Check each interface
+	for _, iface := range interfaces {
+		// Skip down interfaces
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+
+		// Get addresses for this interface
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		// Check each address
+		for _, addr := range addrs {
+			switch v := addr.(type) {
+			case *net.IPNet:
+				if v.Contains(ip) {
+					return true
+				}
+			case *net.IPAddr:
+				if v.IP.Equal(ip) {
+					return true
 				}
 			}
-			return true, XDCPacketInfo{Type: MessagePassing, Details: "RLP Encoded Data"}, "RLP Encoded Data"
 		}
 	}
 
-	// Check for common protocol IDs in XDC
-	if len(payload) >= 3 {
-		// Look for common protocol identifiers
-		if string(payload[:3]) == "ETH" || string(payload[:3]) == "XDC" {
-			return true, XDCPacketInfo{Type: MessagePassing, Details: "XDC Protocol Data"}, "XDC Protocol Data"
-		}
-	}
-
-	// Check for readable strings that might be XDC-related
-	payloadStr := string(payload)
-	if strings.Contains(strings.ToLower(payloadStr), "xdc") ||
-		strings.Contains(strings.ToLower(payloadStr), "xinfin") ||
-		strings.Contains(payloadStr, "enode://") {
-		return true, XDCPacketInfo{Type: MessagePassing, Details: "XDC Protocol String Data"}, "XDC Protocol String Data"
-	}
-
-	// Check for DiscV5 discovery protocol signatures (used by XDC)
-	if len(payload) >= 65 { // Minimum size for a DiscV5 packet
-		// DiscV5 packets have a 32-byte signature followed by packet type
-		// The signature is ECDSA over the packet data
-		// Common packet types: PING (0x01), PONG (0x02), FINDNODE (0x03), NODES (0x04)
-		packetType := payload[32]
-		switch packetType {
-		case 0x01:
-			return true, XDCPacketInfo{Type: PingPong, Details: "DiscV5 PING Message"}, "DiscV5 PING Message"
-		case 0x02:
-			return true, XDCPacketInfo{Type: PingPong, Details: "DiscV5 PONG Message"}, "DiscV5 PONG Message"
-		case 0x03:
-			return true, XDCPacketInfo{Type: MessagePassing, Details: "DiscV5 FINDNODE Message"}, "DiscV5 FINDNODE Message"
-		case 0x04:
-			return true, XDCPacketInfo{Type: MessagePassing, Details: "DiscV5 NODES Message"}, "DiscV5 NODES Message"
-		}
-	}
-
-	// Check for hex patterns that might indicate blockchain data
-	// This is a heuristic approach
-	hexCount := 0
-	for _, b := range payload {
-		if (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F') {
-			hexCount++
-		}
-	}
-
-	// If a high percentage of the payload looks like hex, it might be blockchain data
-	if float32(hexCount)/float32(len(payload)) > 0.7 {
-		return true, XDCPacketInfo{Type: MessagePassing, Details: "Hex-encoded Blockchain Data"}, "Hex-encoded Blockchain Data"
-	}
-
-	return false, XDCPacketInfo{Type: Unknown, Details: "Not XDC traffic"}, ""
+	return false
 }
