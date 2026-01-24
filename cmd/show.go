@@ -3,7 +3,6 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"text/tabwriter"
@@ -36,7 +35,7 @@ func showPeerData(format string) {
 	dataFile := filepath.Join(peerdDir, "peer-data.json")
 
 	// Read the data file
-	data, err := ioutil.ReadFile(dataFile)
+	data, err := os.ReadFile(dataFile)
 	if err != nil {
 		fmt.Printf("No peer data found at %s\n", dataFile)
 		fmt.Println("Run 'peer-sniffer start' first to collect data")
@@ -60,20 +59,18 @@ func showPeerData(format string) {
 
 func displayPeerTable(peerData map[string]interface{}) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "Peer IP\tLast Seen\tTotal Msgs\tIncoming\tOutgoing\tActive")
-	fmt.Fprintln(w, "-------\t---------\t----------\t--------\t--------\t------")
-	
+	fmt.Fprintln(w, "Peer IP\tLast Seen\tTotal Msgs\tActive")
+	fmt.Fprintln(w, "-------\t---------\t----------\t------")
+
 	for peerIP, data := range peerData {
 		if peerInfo, ok := data.(map[string]interface{}); ok {
 			lastSeen := peerInfo["last_seen"]
 			totalMsgs := peerInfo["total_messages"]
-			incoming := peerInfo["incoming_messages"]
-			outgoing := peerInfo["outgoing_messages"]
-			
-			fmt.Fprintf(w, "%s\t%v\t%v\t%v\t%v\tYes\n", 
-				peerIP, lastSeen, totalMsgs, incoming, outgoing)
+
+			fmt.Fprintf(w, "%s\t%v\t%v\tYes\n",
+				peerIP, lastSeen, totalMsgs)
 		}
 	}
-	
+
 	w.Flush()
 }

@@ -1,10 +1,10 @@
-# XDC Peer Sniffer
+# Peer Sniffer
 
-A Go application that captures and analyzes peer-to-peer traffic on the XDC network with peer scoring capabilities.
+A Go application that captures and analyzes network traffic with focus on XDC (XinFin) protocol detection and peer analysis.
 
 ## Overview
 
-This tool captures network packets on your machine and analyzes peer-to-peer traffic on the XDC (XinFin) network. It monitors specific ports used by XDC nodes, decodes protocol data, and provides peer scoring with a configurable sliding window.
+This tool captures network packets on your machine and analyzes traffic to identify XDC (XinFin) network communications. It uses port-based filtering (30000-65535) and protocol analysis to detect XDC traffic, with enhanced local/external connection handling.
 
 ## Prerequisites
 
@@ -44,23 +44,17 @@ The application uses a command-line interface with multiple subcommands:
 
 #### Initialize
 ```bash
-# Initialize the .peerd directory with default config and .env
+# Initialize the .peerd directory with default config
 peer-sniffer init
 ```
 
-#### Start Monitoring
+#### Start Monitoring (requires sudo)
 ```bash
 # Start monitoring XDC network traffic
 peer-sniffer start
 
-# Specify network interface directly
-peer-sniffer start --interface en0
-
-# Log only XDC traffic
+# Log only XDC traffic (filtered by port range 30000-65535)
 peer-sniffer start --xdc-only
-
-# Use specific interface
-peer-sniffer start --interface en0 --xdc-only
 ```
 
 #### Show Peer Data
@@ -87,50 +81,10 @@ peer-sniffer show --help
 The application stores configuration and data in `~/.peerd/` directory:
 - `config.json` - Configuration file
 - `peer-data.json` - Collected peer statistics
-- `.env` - Environment variables
-
-The default configuration includes:
-
-```json
-{
-  "interface": "en0",
-  "log_xdc_only": false,
-  "xdc_nodes": [],
-  "xdc_ports": [
-    "30303",
-    "30304", 
-    "30305",
-    "30306",
-    "30307",
-    "30308",
-    "30309",
-    "30310",
-    "30311",
-    "30312",
-    "30313"
-  ],
-  "buffer_size": 1600,
-  "promiscuous_mode": true
-}
-```
 
 ### Network Interface Selection
 
-The application defaults to monitoring `en0` interface. To see available interfaces:
-
-#### On macOS:
-```bash
-networksetup -listallhardwareports
-# or
-ifconfig
-```
-
-#### On Linux:
-```bash
-ip link show
-# or
-ifconfig -a
-```
+The application monitors all interfaces by default. The tool automatically detects local machine IP addresses and applies intelligent filtering based on connection type.
 
 ## OS-Level Configuration
 
@@ -138,34 +92,40 @@ ifconfig -a
 
 On macOS, you need to grant special permissions for packet capture:
 
-1. **Run with sudo** (recommended for development):
+**Run with sudo** (required):
 ```bash
 sudo peer-sniffer start
 ```
-
-2. **Or create a privileged helper** (for production):
-   - macOS requires special entitlements for raw socket access
-   - Consider building a signed application with appropriate entitlements
-   - The application will need the `com.apple.security.network.socket` entitlement
 
 ### Linux
 
 On Linux, you need to run with appropriate privileges:
 
-1. **Run with sudo**:
+**Run with sudo**:
 ```bash
 sudo peer-sniffer start
 ```
 
-## Environment Variables
+## Features
 
-For handling encrypted data, set the XDC private key:
+### Port-Based Filtering
+- Filters traffic in the XDC port range (30000-65535)
+- Intelligent handling of local vs external connections
+- When one endpoint is local, only checks the external machine's port
+- When both endpoints are external, checks both ports
 
-```bash
-export XDC_PRIVATE_KEY="your_private_key_here"
-```
+### Local/External Connection Handling
+- Automatically detects local machine IP addresses across all network interfaces
+- Properly identifies 192.168.x.x, 10.x.x.x, 172.16-31.x.x, and other local address ranges
+- Optimizes filtering based on connection direction
 
-## Output Format
+### Protocol Analysis
+- Detects DevP2P handshakes
+- Identifies Discovery V4/V5 packets
+- Recognizes encrypted RLPx frames
+- Analyzes XDC-specific protocol structures
+
+### Output Format
 
 The application outputs JSON-formatted records for each captured packet:
 
@@ -177,35 +137,21 @@ The application outputs JSON-formatted records for each captured packet:
   "src_port": "54321",
   "dst_port": "30303",
   "protocol": "TCP",
-  "data": "hex_encoded_payload",
   "is_xdc": true,
+  "details": "DevP2P ECIES handshake",
+  "type": "DevP2PHandshake",
+  "data": "hex_encoded_payload",
   "size": 1234
 }
 ```
 
-## Peer Scoring System
+### Peer Data Collection
 
-The application includes an automatic peer scoring system with a configurable sliding window (default 100 seconds) that tracks:
-
-- **Message Direction**: Distinguishes between outgoing (from our node) and incoming (to our node) messages
-- **Message Types**: Tracks different types of XDC protocol messages (transactions, blocks, pings, etc.)
-- **Peer Statistics**: Maintains statistics for each peer including:
-  - Last seen timestamp
-  - Total message count
-  - Incoming vs outgoing message counts
-  - Message type distribution
-- **Stale Peer Detection**: Identifies peers that are no longer active or frequently disconnecting
-
-The system helps identify:
-- **Good Peers**: Active in propagating transactions and blocks
-- **Bad Peers**: Frequently disconnecting or inactive
-
-### Statistics Storage
-
-Peer statistics are automatically saved to `~/.peerd/peer-data.json` and can be viewed with:
-```bash
-peer-sniffer show
-```
+Peer statistics are automatically saved to `~/.peerd/peer-data.json` and include:
+- Last seen timestamp
+- Total message count
+- Protocol distribution
+- Message type breakdown
 
 ## Building
 
@@ -230,19 +176,10 @@ make install-go
 
 This will install the binary to `~/go/bin/peer-sniffer`.
 
-## Decoding Capabilities
-
-The application attempts to decode various types of XDC network data:
-
-- DevP2P protocol messages (Hello, Ping, Pong, etc.)
-- RLP-encoded data structures
-- XDC-specific protocol identifiers
-- Potentially encrypted data (with private key provided)
-
 ## Troubleshooting
 
 - If you get "Permission denied" errors, try running with `sudo`
-- If no packets are captured, verify the correct network interface is selected
+- If no packets are captured, ensure you're running with appropriate privileges
 - On macOS, if you get libpcap errors, ensure Xcode command line tools are installed: `xcode-select --install`
 - Check `~/.peerd/peer-data.json` for collected peer statistics
-- If using a VPN, traffic may be routed through the VPN interface instead of the physical interface
+- If using a VPN, traffic may be routed through the VPN interface
