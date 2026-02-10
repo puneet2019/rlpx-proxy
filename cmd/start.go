@@ -123,7 +123,7 @@ func startMonitoring(xdcOnly bool) {
 				isXDCResult, resp = analyzeXDCPayloadSafeShared(payload, srcIP, dstIP, srcPort, dstPort, protocol)
 
 				// Skip non-XDC traffic if xdc-only is enabled
-				if !isXDCResult {
+				if xdcOnly && !isXDCResult {
 					continue
 				}
 
