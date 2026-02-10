@@ -57,6 +57,23 @@ peer-sniffer start
 peer-sniffer start --xdc-only
 ```
 
+#### Start2 Enhanced Monitoring (requires sudo)
+```bash
+# Start enhanced monitoring with peer tracking and statistics
+peer-sniffer start2
+
+# Enhanced monitoring with handshake tracking (default behavior)
+peer-sniffer start2 --track-handshakes
+
+# Different output formats
+peer-sniffer start2 --output json
+peer-sniffer start2 --output text
+peer-sniffer start2 --output csv
+
+# Custom filter
+peer-sniffer start2 --filter "tcp port 30303"
+```
+
 #### Show Peer Data
 ```bash
 # Show collected peer statistics in table format
@@ -152,6 +169,89 @@ Peer statistics are automatically saved to `~/.peerd/peer-data.json` and include
 - Total message count
 - Protocol distribution
 - Message type breakdown
+
+## Docker Compose Setup
+
+The project includes a Docker Compose setup for running the peer sniffer alongside an XDC node:
+
+```yaml
+version: '3.8'
+
+services:
+  xdc-peer-sniffer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: xdc-peer-sniffer
+    command: ["./peer-sniffer", "start2", "--track-handshakes=true", "--output=json"]
+    network_mode: "host"  # Allows the container to access host network interfaces
+    volumes:
+      - ./peerd-data:/root/.peerd  # Mount volume to persist peer data
+    privileged: true  # Required for network packet capture
+    restart: unless-stopped
+    environment:
+      - HOME=/root
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  xdc-node:  # Placeholder for your XDC node service
+    image: your-xdc-node-image:latest  # Replace with your actual XDC node image
+    container_name: xdc-node
+    ports:
+      - "30303:30303/tcp"
+      - "30303:30303/udp"
+      - "8545:8545"  # RPC port
+      - "8546:8546"  # WebSocket port
+    volumes:
+      - ./xdc-data:/root/.xdc  # Mount for XDC node data
+      - ./peerd-data:/root/.peerd  # Share peer data with sniffer
+    restart: unless-stopped
+    depends_on:
+      - xdc-peer-sniffer
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+```
+
+### Running with Docker Compose
+
+1. Build and start the services:
+```bash
+docker-compose up -d
+```
+
+2. View logs:
+```bash
+docker-compose logs -f xdc-peer-sniffer
+```
+
+3. The peer sniffer will generate statistics and save top peers to `/peerd-data/top-peers.json` inside the container, which can be accessed from the host at `./peerd-data/top-peers.json`.
+
+## Use Case: Dynamic Peer Management
+
+The `start2` command is specifically designed to work with XDC nodes in a Docker Compose setup to:
+
+- Monitor handshakes from the beginning to identify peer IDs
+- Track peer activity levels to determine which peers are active
+- Generate a list of top-performing peers that can be used to update static peer lists
+- Help maintain healthy connections by identifying and promoting good peers while demoting inactive ones
+
+## Advanced Features
+
+### Top Peers Tracking
+The `start2` command generates a `top-peers.json` file that contains the most active peers based on handshake activity and connection frequency. This file can be used to maintain an optimized list of reliable peers for your XDC node.
+
+### Real-time Statistics
+During monitoring, the `start2` command provides real-time statistics showing the most active peers with information about:
+- Number of handshakes initiated
+- Number of connections made
+- Last seen timestamp
+- Activity score based on engagement level
 
 ## Building
 

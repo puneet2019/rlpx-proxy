@@ -1,4 +1,4 @@
-FROM golang:1.19-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git build-base linux-headers libpcap-dev
@@ -21,11 +21,7 @@ RUN go build -o peer-sniffer ./cmd/peer-sniffer
 FROM alpine:latest
 
 # Install runtime dependencies
-RUN apk --no-cache add ca-certificates libpcap-dev
-
-# Create non-root user
-RUN addgroup -g 65532 nonroot && \
-    adduser -D -u 65532 -G nonroot nonroot
+RUN apk --no-cache add ca-certificates libpcap
 
 # Set working directory
 WORKDIR /root/
@@ -33,14 +29,14 @@ WORKDIR /root/
 # Copy the binary from builder stage
 COPY --from=builder /app/peer-sniffer .
 
-# Change ownership to non-root user
-RUN chown -R nonroot:nonroot /root/
-
-# Switch to non-root user
-USER nonroot
+# Make the binary executable
+RUN chmod +x ./peer-sniffer
 
 # Expose port (not typically used for packet capture)
 EXPOSE 8080
 
-# Run the application
-CMD ["./peer-sniffer", "start"]
+# Create a directory for storing peer data and ensure it exists
+RUN mkdir -p /root/.peerd
+
+# Ensure .peerd directory exists and run the application
+ENTRYPOINT ["/root/peer-sniffer"]
