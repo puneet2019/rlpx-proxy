@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -14,6 +13,7 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 	"github.com/spf13/cobra"
+	"peer-sniffer/pkg/types"
 )
 
 var startCmd = &cobra.Command{
@@ -63,6 +63,17 @@ func startMonitoring(xdcOnly bool) {
 	// Initialize peer data map
 	peerData := make(map[string]interface{})
 
+	// Create a ticker for periodic saving of peer data (every 30 seconds)
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	// Goroutine to periodically save peer data
+	go func() {
+		for range ticker.C {
+			savePeerDataToFile(peerData)
+		}
+	}()
+
 	for packet := range packetSource.Packets() {
 		// Parse layers
 		var srcIP, dstIP string
@@ -97,7 +108,7 @@ func startMonitoring(xdcOnly bool) {
 
 		// Extract payload data if available
 		var data string
-		var resp XDCPacketInfo
+		var resp types.XDCPacketInfo
 		var isXDCResult bool
 		appLayer := packet.ApplicationLayer()
 		if appLayer != nil {
@@ -109,7 +120,7 @@ func startMonitoring(xdcOnly bool) {
 				// Analyze XDC payload to detect traffic and decode
 				// The function will check both srcPort and dstPort for XDC range (30000-65535)
 				// It will also consider localhost connections when determining XDC traffic
-				isXDCResult, resp = analyzeXDCPayloadSafe(payload, srcIP, dstIP, srcPort, dstPort, protocol)
+				isXDCResult, resp = analyzeXDCPayloadSafeShared(payload, srcIP, dstIP, srcPort, dstPort, protocol)
 
 				// Skip non-XDC traffic if xdc-only is enabled
 				if !isXDCResult {
@@ -154,10 +165,10 @@ func startMonitoring(xdcOnly bool) {
 
 		// Update peer data for storage
 		updatePeerData(&peerData, srcIP, dstIP, protocol, resp.Details)
-
-		// Save peer data to file periodically
-		savePeerDataToFile(peerData)
 	}
+
+	// Save peer data one final time before exiting
+	savePeerDataToFile(peerData)
 }
 
 // updatePeerData updates the peer data map with new information
@@ -234,44 +245,27 @@ func savePeerDataToFile(peerData map[string]interface{}) {
 	}
 }
 
-type XDCPacketType string
-
-const (
-	Unknown         XDCPacketType = "Unknown"
-	DevP2PHandshake               = "DevP2PHandshake"
-	DiscV4                        = "DiscV4"
-	DiscV5                        = "DiscV5"
-	EncryptedRLPx                 = "EncryptedRLPx"
-)
-
-type XDCPacketInfo struct {
-	Type     XDCPacketType
-	Details  string
-	PeerIP   string
-	PeerPort string
-	PeerID   string // only populated if cryptographically verifiable
-}
-
-func analyzeXDCPayloadSafe(
+// Wrapper function to use shared types
+func analyzeXDCPayloadSafeShared(
 	payload []byte,
 	srcIP string,
 	dstIP string,
 	srcPort string,
 	dstPort string,
 	protocol string,
-) (bool, XDCPacketInfo) {
+) (bool, types.XDCPacketInfo) {
 
 	if len(payload) == 0 {
-		return false, XDCPacketInfo{Type: Unknown, Details: "empty payload"}
+		return false, types.XDCPacketInfo{Type: types.Unknown, Details: "empty payload"}
 	}
 
 	// Parse the source and destination ports to integers
-	srcPortInt := parseIntPort(srcPort)
-	dstPortInt := parseIntPort(dstPort)
+	srcPortInt := types.ParseIntPort(srcPort)
+	dstPortInt := types.ParseIntPort(dstPort)
 
 	// Check if either endpoint is a local IP
-	isSrcLocal := isLocalIP(srcIP)
-	isDstLocal := isLocalIP(dstIP)
+	isSrcLocal := types.IsLocalIP(srcIP)
+	isDstLocal := types.IsLocalIP(dstIP)
 
 	// Check if either port is in XDC range (30000-65535)
 	var isInXDPortRange bool
@@ -290,15 +284,15 @@ func analyzeXDCPayloadSafe(
 
 	// If not in XDC port range, return false early
 	if !isInXDPortRange {
-		return false, XDCPacketInfo{Type: Unknown, Details: "port not in XDC range (30000-65535)"}
+		return false, types.XDCPacketInfo{Type: types.Unknown, Details: "port not in XDC range (30000-65535)"}
 	}
 
 	// --- 1. DevP2P ECIES handshake (unencrypted) ---
 	// Auth / Ack packets are fixed-size-ish and NOT random
 	// They always begin with ECIES data, not ASCII or RLP
-	if looksLikeDevP2PHandshake(payload) {
-		return true, XDCPacketInfo{
-			Type:     DevP2PHandshake,
+	if types.LooksLikeDevP2PHandshake(payload) {
+		return true, types.XDCPacketInfo{
+			Type:     types.DevP2PHandshake,
 			Details:  "DevP2P ECIES handshake",
 			PeerIP:   srcIP,
 			PeerPort: srcPort,
@@ -307,9 +301,9 @@ func analyzeXDCPayloadSafe(
 	}
 
 	// --- 2. Discovery v5 (cryptographically signed UDP packets) ---
-	if looksLikeDiscV5(payload) {
-		return true, XDCPacketInfo{
-			Type:     DiscV5,
+	if types.LooksLikeDiscV5(payload) {
+		return true, types.XDCPacketInfo{
+			Type:     types.DiscV5,
 			Details:  "Discovery v5 packet",
 			PeerIP:   srcIP,
 			PeerPort: srcPort,
@@ -318,9 +312,9 @@ func analyzeXDCPayloadSafe(
 	}
 
 	// --- 3. Discovery v4 ---
-	if looksLikeDiscV4(payload) {
-		return true, XDCPacketInfo{
-			Type:     DiscV4,
+	if types.LooksLikeDiscV4(payload) {
+		return true, types.XDCPacketInfo{
+			Type:     types.DiscV4,
 			Details:  "Discovery v4 packet",
 			PeerIP:   srcIP,
 			PeerPort: srcPort,
@@ -331,102 +325,11 @@ func analyzeXDCPayloadSafe(
 	// --- 4. Everything else is encrypted RLPx ---
 	// We DO NOT attempt to decode it
 
-	return protocol == "TCP", XDCPacketInfo{
-		Type:     EncryptedRLPx,
+	return protocol == "TCP", types.XDCPacketInfo{
+		Type:     types.EncryptedRLPx,
 		Details:  "Encrypted RLPx frame (opaque)",
 		PeerIP:   srcIP,
 		PeerPort: srcPort,
 		PeerID:   "",
 	}
-}
-
-func looksLikeDevP2PHandshake(b []byte) bool {
-	// ECIES auth / ack sizes are predictable-ish
-	// Auth ≈ 194 bytes, Ack ≈ 97 bytes (varies slightly)
-	if len(b) < 90 || len(b) > 300 {
-		return false
-	}
-
-	// Without entropy check, we rely on size alone for now
-	// Could add other heuristics later if needed
-	return true
-}
-
-func looksLikeDiscV5(b []byte) bool {
-	// DiscV5: 32-byte hash + signature + packet-type
-	if len(b) < 63 {
-		return false
-	}
-	return isValidDiscV5PacketType(b[32])
-}
-
-func looksLikeDiscV4(b []byte) bool {
-	// DiscV4 packets are signed
-	if len(b) < 98 {
-		return false
-	}
-	// Without entropy check, we rely on size alone for now
-	// Could add other heuristics later if needed
-	return true
-}
-
-func isValidDiscV5PacketType(t byte) bool {
-	switch t {
-	case 0x01, 0x02, 0x03, 0x04, 0x05:
-		return true
-	default:
-		return false
-	}
-}
-
-// parseIntPort converts a port string to an integer
-func parseIntPort(portStr string) int {
-	var port int
-	fmt.Sscanf(portStr, "%d", &port)
-	return port
-}
-
-// isLocalIP checks if an IP address belongs to any of the local network interfaces
-func isLocalIP(ipAddr string) bool {
-	// Parse the IP address
-	ip := net.ParseIP(ipAddr)
-	if ip == nil {
-		return false
-	}
-
-	// Get all network interfaces
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return false
-	}
-
-	// Check each interface
-	for _, iface := range interfaces {
-		// Skip down interfaces
-		if iface.Flags&net.FlagUp == 0 {
-			continue
-		}
-
-		// Get addresses for this interface
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-
-		// Check each address
-		for _, addr := range addrs {
-			switch v := addr.(type) {
-			case *net.IPNet:
-				if v.Contains(ip) {
-					return true
-				}
-			case *net.IPAddr:
-				if v.IP.Equal(ip) {
-					return true
-				}
-			}
-		}
-	}
-
-	return false
 }
