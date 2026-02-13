@@ -1,9 +1,10 @@
+# Example docker-compose.yml for running rlpx-proxy with an XDC node.
+# Copy this file to the project root, create a .env file with your keys,
+# and run: docker compose up -d --build
+
 services:
   xdc-node:
-    build:
-      context: .
-      dockerfile: Dockerfile.xdc-arm64
-    image: xdposchain-arm64:v2.6.8
+    image: xinfinorg/xdposchain:v2.6.8
     expose:
       - "30303/tcp"
     ports:
@@ -15,7 +16,6 @@ services:
       - XDC_NODEKEYHEX=${NODE_P2P_KEY}
     volumes:
       - ./xdc-data:/work/xdcchain
-      - ./bootnodes.list:/work/mainnet/bootnodes.list:ro
 
   rlpx-proxy:
     build: .
@@ -26,6 +26,7 @@ services:
       - UPSTREAM_HOST=xdc-node
       - UPSTREAM_PORT=30303
       - PEERS_FILE=/etc/rlpx-proxy/peers.json
+      - MAX_OUTBOUND=10
     volumes:
       - ./static-nodes.json:/etc/rlpx-proxy/peers.json:ro
     depends_on:

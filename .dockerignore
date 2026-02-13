@@ -1,0 +1,5 @@
+xdc-data/
+build/
+*.json
+*.list
+.env

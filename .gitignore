@@ -1,11 +1,23 @@
+# Build artifacts
 build/
-*.log
-*.out
-.DS_Store
-.idea/
-.vscode/
-*.swp
-*.swo
-.peerd/
-peerd-data/
+/rlpx-proxy
+/rlpx-monitor
+
+# Chain data (large)
 xdc-data/
+
+# Secrets
+.env
+
+# Generated data files (use example/ for samples)
+/peers.json
+/good-peers.json
+/static-nodes.json
+/static-nodes-full.json
+/bootnodes.list
+
+# IDE
+.idea/
+
+# OS
+.DS_Store

@@ -1,42 +1,14 @@
 FROM golang:1.24-alpine AS builder
 
-# Install build dependencies
-RUN apk add --no-cache git build-base linux-headers libpcap-dev
+RUN apk add --no-cache gcc musl-dev
 
-# Set working directory
-WORKDIR /app
-
-# Copy go mod files
+WORKDIR /src
 COPY go.mod go.sum ./
-
-# Download dependencies
 RUN go mod download
-
-# Copy source code
 COPY . .
-
-# Build the application
-RUN go build -o peer-sniffer ./cmd/peer-sniffer
+RUN CGO_ENABLED=0 go build -o /rlpx-proxy ./cmd/rlpx-proxy
 
 FROM alpine:latest
-
-# Install runtime dependencies
-RUN apk --no-cache add ca-certificates libpcap
-
-# Set working directory
-WORKDIR /root/
-
-# Copy the binary from builder stage
-COPY --from=builder /app/peer-sniffer .
-
-# Make the binary executable
-RUN chmod +x ./peer-sniffer
-
-# Expose port (not typically used for packet capture)
-EXPOSE 8080
-
-# Create a directory for storing peer data and ensure it exists
-RUN mkdir -p /root/.peerd
-
-# Ensure .peerd directory exists and run the application
-ENTRYPOINT ["/root/peer-sniffer"]
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /rlpx-proxy /usr/local/bin/rlpx-proxy
+ENTRYPOINT ["rlpx-proxy"]
