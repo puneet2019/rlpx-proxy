@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"peer-sniffer/pkg/logger"
+	"peer-sniffer/pkg/sessiontracker"
 	"peer-sniffer/pkg/types"
 
 	"github.com/google/gopacket"
@@ -17,9 +19,6 @@ import (
 	"github.com/google/gopacket/pcap"
 	"github.com/spf13/cobra"
 )
-
-// Import the PeerStat type from types package instead of duplicating
-// (already imported via "peer-sniffer/pkg/types")
 
 var start2Cmd = &cobra.Command{
 	Use:   "start2",
@@ -31,24 +30,22 @@ var start2Cmd = &cobra.Command{
 			return
 		}
 
-		xdcOnly, _ := cmd.Flags().GetBool("xdc-only")
 		outputFormat, _ := cmd.Flags().GetString("output")
 		filter, _ := cmd.Flags().GetString("filter")
 		trackHandshakes, _ := cmd.Flags().GetBool("track-handshakes")
 
-		startMonitoringEnhanced(xdcOnly, outputFormat, filter, trackHandshakes)
+		startMonitoringEnhanced(outputFormat, filter, trackHandshakes)
 	},
 }
 
 func init() {
-	start2Cmd.Flags().Bool("xdc-only", true, "Log only XDC traffic (default true)")
 	start2Cmd.Flags().String("output", "json", "Output format: json, text, csv")
 	start2Cmd.Flags().String("filter", "tcp or udp", "BPF filter for packet capture")
 	start2Cmd.Flags().Bool("track-handshakes", true, "Track handshake information for peer identification")
 	rootCmd.AddCommand(start2Cmd)
 }
 
-func startMonitoringEnhanced(xdcOnly bool, outputFormat string, filter string, trackHandshakes bool) {
+func startMonitoringEnhanced(outputFormat string, filter string, trackHandshakes bool) {
 	// Open the device for packet capture - always use "any" interface
 	handle, err := pcap.OpenLive("any", 1600, true, pcap.BlockForever)
 	if err != nil {
@@ -63,9 +60,7 @@ func startMonitoringEnhanced(xdcOnly bool, outputFormat string, filter string, t
 	}
 
 	fmt.Printf("Starting XDC packet capture on any interface with filter '%s'...\n", filter)
-	if xdcOnly {
-		fmt.Println("Monitoring only XDC traffic...")
-	}
+	fmt.Println("Monitoring all traffic (XDC and non-XDC)...")
 
 	// Print information about handshake tracking
 	if trackHandshakes {
@@ -77,27 +72,79 @@ func startMonitoringEnhanced(xdcOnly bool, outputFormat string, filter string, t
 	// Initialize peer data map with thread safety
 	var peerData sync.Map
 
+	// Create logger instance
+	loggerInstance := logger.NewLogger(outputFormat)
+
+	// Initialize the TCP stream processor (for handshake reconstruction)
+	if err := sessiontracker.InitStreamProcessor(); err != nil {
+		log.Printf("Warning: failed to initialize stream processor: %v", err)
+	}
+
 	// Channel to receive processed packets
-	packetChan := make(chan map[string]interface{}, 100)
+	packetChan := make(chan map[string]interface{}, 1000)
 
 	// Goroutine to handle output formatting
 	go func() {
 		for packetInfo := range packetChan {
-			printPacket(outputFormat, packetInfo)
+			// Only log XDC traffic, discard non-XDC traffic, hence we use LogXDCPacket
+			loggerInstance.LogXDCPacket(packetInfo)
+
 		}
 	}()
 
-	// Track handshake attempts to identify peers early
-	handshakeTracker := make(map[string]*types.PeerActivity)
-
-	// Create a ticker for periodic saving of peer data (every 30 seconds)
-	ticker := time.NewTicker(30 * time.Second)
+	// Create a ticker for periodic saving of peer data (every 10 seconds)
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
+
+	// Create a ticker for periodic decryption and logging (every 5 seconds)
+	decryptTicker := time.NewTicker(5 * time.Second)
+	defer decryptTicker.Stop()
 
 	// Goroutine to periodically save peer data
 	go func() {
 		for range ticker.C {
 			savePeerDataToFileEnhanced(&peerData)
+		}
+	}()
+
+	// Goroutine to periodically report established sessions and traffic types
+	go func() {
+		for range decryptTicker.C {
+			// Get all sessions from the session tracker
+			sessions := sessiontracker.GetAllSessions()
+
+			establishedCount := 0
+			handshakeCount := 0
+			dataTransferCount := 0
+
+			for sessionID, session := range sessions {
+				if session.P2PSession != nil {
+					if session.P2PSession.Established {
+						log.Printf("Active session: %s with peer %s", sessionID, session.P2PSession.PeerID)
+						establishedCount++
+						dataTransferCount++
+					} else {
+						// Check if this session has handshake data but is not yet established
+						hasAuth := session.P2PSession.AuthRespHash != nil
+						hasAck := session.P2PSession.AckHash != nil
+						if hasAuth || hasAck {
+							status := "Partial handshake"
+							if hasAuth && hasAck {
+								status = "Handshake complete (no frame keys — passive sniffing/PFS)"
+							} else if hasAuth {
+								log.Printf("Auth packet captured: %s (awaiting Ack)", sessionID)
+							} else if hasAck {
+								log.Printf("Ack packet captured: %s (awaiting Auth)", sessionID)
+							}
+							log.Printf("%s: %s", status, sessionID)
+							handshakeCount++
+						}
+					}
+				}
+			}
+
+			log.Printf("Summary - Established: %d, Handshakes: %d, Data Transfers: %d",
+				establishedCount, handshakeCount, dataTransferCount)
 		}
 	}()
 
@@ -117,6 +164,11 @@ func startMonitoringEnhanced(xdcOnly bool, outputFormat string, filter string, t
 				srcIP = layer.SrcIP.String()
 				dstIP = layer.DstIP.String()
 			}
+		}
+
+		// Skip local-to-local traffic
+		if types.IsLocalIP(srcIP) && types.IsLocalIP(dstIP) {
+			continue // Skip local-to-local traffic completely
 		}
 
 		transportLayer := packet.TransportLayer()
@@ -144,12 +196,21 @@ func startMonitoringEnhanced(xdcOnly bool, outputFormat string, filter string, t
 				// Store raw hex data
 				data = hex.EncodeToString(payload)
 
-				// Analyze XDC payload to detect traffic and decode
-				isXDCResult, resp = analyzeXDCPayloadSafe(payload, srcIP, dstIP, srcPort, dstPort, protocol)
+				// Determine if this is XDC traffic based on port ranges
+				isXDCResult = isXDCTraffic(srcIP, dstIP, srcPort, dstPort)
 
-				// Skip non-XDC traffic if xdc-only is enabled
-				if xdcOnly && !isXDCResult {
-					continue
+				// Create response object based on packet type if it's XDC traffic
+				if isXDCResult {
+					resp = classifyPacketType(payload, srcIP, dstIP, srcPort, dstPort, protocol)
+				} else {
+					// For non-XDC traffic, just mark as unknown
+					resp = types.XDCPacketInfo{
+						Type:     types.Unknown,
+						Details:  "Non-XDC traffic",
+						PeerIP:   srcIP,
+						PeerPort: srcPort,
+						PeerID:   "",
+					}
 				}
 
 				if len(data) > 100 {
@@ -157,6 +218,9 @@ func startMonitoringEnhanced(xdcOnly bool, outputFormat string, filter string, t
 				}
 			}
 		}
+
+		// Create a canonical session ID that is the same for both directions of a connection
+		sessionID := sessiontracker.CreateCanonicalSessionID(srcIP, srcPort, dstIP, dstPort)
 
 		// Create a packet info structure
 		packetInfo := map[string]interface{}{
@@ -173,22 +237,39 @@ func startMonitoringEnhanced(xdcOnly bool, outputFormat string, filter string, t
 			"size":      len(packet.Data()),
 		}
 
-		// Send packet to output goroutine
-		select {
-		case packetChan <- packetInfo:
-		default:
-			// Drop packet if channel is full to prevent blocking
-			log.Printf("Dropping packet due to full channel buffer")
+		// Attempt to decrypt encrypted packets if we have an established session
+		currentAppLayer := packet.ApplicationLayer()
+		if currentAppLayer != nil && resp.Type == types.EncryptedRLPx {
+			payload := currentAppLayer.Payload()
+			if len(payload) > 0 {
+				decryptedData, err := sessiontracker.DecryptAndLogPlaintext(sessionID, payload)
+				if err != nil {
+					// Log decryption errors for debugging
+					log.Printf("Decryption failed for session %s: %v", sessionID, err)
+				} else if len(decryptedData) > 0 {
+					// Add decrypted message to packet info
+					packetInfo["decrypted_msg"] = string(decryptedData)
+					log.Printf("Successfully decrypted message for session %s: %d bytes", sessionID, len(decryptedData))
+				} else {
+					log.Printf("Decryption succeeded but returned empty data for session %s", sessionID)
+				}
+			}
 		}
 
-		// Track handshake information for peer identification
-		if trackHandshakes && resp.Type == types.DevP2PHandshake {
-			trackHandshake(handshakeTracker, srcIP, dstIP, resp)
-
-			// Periodically output peer statistics
-			if len(handshakeTracker)%10 == 0 { // Every 10 handshakes
-				outputPeerStats(handshakeTracker)
+		// Only send XDC packets to output goroutine, discard non-XDC traffic
+		if isXDCResult {
+			select {
+			case packetChan <- packetInfo:
+			default:
+				// Drop packet if channel is full to prevent blocking
+				log.Printf("Dropping XDC packet due to full channel buffer")
 			}
+		}
+
+		// Process the packet with session tracker to extract handshake info and derive session keys
+		if err := sessiontracker.ProcessPacket(packet); err != nil {
+			// Log error but continue processing other packets
+			log.Printf("Error processing packet with session tracker: %v", err)
 		}
 
 		// Update peer data for storage (thread-safe)
@@ -286,182 +367,8 @@ func savePeerDataToFileEnhanced(peerData *sync.Map) {
 	}
 }
 
-// printPacket formats and prints the packet based on the output format
-func printPacket(format string, packetInfo map[string]interface{}) {
-	switch format {
-	case "text":
-		fmt.Printf("[%s] %s:%s -> %s:%s (%s) | Type: %s | Size: %d bytes\n",
-			packetInfo["timestamp"],
-			packetInfo["src_ip"], packetInfo["src_port"],
-			packetInfo["dst_ip"], packetInfo["dst_port"],
-			packetInfo["protocol"],
-			packetInfo["type"],
-			packetInfo["size"])
-	case "csv":
-		fmt.Printf("%s,%s,%s,%s,%s,%s,%s,%s,%d\n",
-			packetInfo["timestamp"],
-			packetInfo["src_ip"], packetInfo["src_port"],
-			packetInfo["dst_ip"], packetInfo["dst_port"],
-			packetInfo["protocol"],
-			packetInfo["type"],
-			packetInfo["details"],
-			packetInfo["size"])
-	default: // json
-		jsonData, err := json.Marshal(packetInfo)
-		if err != nil {
-			log.Printf("Error marshaling packet info: %v", err)
-			return
-		}
-		fmt.Println(string(jsonData))
-	}
-}
-
-// trackHandshake records handshake information for peer identification
-func trackHandshake(tracker map[string]*types.PeerActivity, srcIP, dstIP string, handshakeInfo types.XDCPacketInfo) {
-	// Track source IP
-	if _, exists := tracker[srcIP]; !exists {
-		tracker[srcIP] = &types.PeerActivity{
-			IP:            srcIP,
-			LastSeen:      time.Now(),
-			Connections:   0,
-			Handshakes:    0,
-			BytesSent:     0,
-			BytesReceived: 0,
-			Active:        true,
-		}
-	}
-	tracker[srcIP].Handshakes++
-	tracker[srcIP].LastSeen = time.Now()
-
-	// Track destination IP
-	if _, exists := tracker[dstIP]; !exists {
-		tracker[dstIP] = &types.PeerActivity{
-			IP:            dstIP,
-			LastSeen:      time.Now(),
-			Connections:   0,
-			Handshakes:    0,
-			BytesSent:     0,
-			BytesReceived: 0,
-			Active:        true,
-		}
-	}
-	tracker[dstIP].Connections++
-	tracker[dstIP].LastSeen = time.Now()
-}
-
-// outputPeerStats outputs peer statistics to help identify good and bad peers
-func outputPeerStats(tracker map[string]*types.PeerActivity) {
-	fmt.Println("\n=== PEER ACTIVITY STATISTICS ===")
-
-	// Sort peers by handshake count to identify most active
-	var sortedPeers []types.PeerStat
-	for ip, stats := range tracker {
-		sortedPeers = append(sortedPeers, types.PeerStat{IP: ip, Stats: stats})
-	}
-
-	// Simple bubble sort by handshake count (descending)
-	for i := 0; i < len(sortedPeers)-1; i++ {
-		for j := 0; j < len(sortedPeers)-i-1; j++ {
-			if sortedPeers[j].Stats.Handshakes < sortedPeers[j+1].Stats.Handshakes {
-				sortedPeers[j], sortedPeers[j+1] = sortedPeers[j+1], sortedPeers[j]
-			}
-		}
-	}
-
-	// Output top 10 most active peers
-	topN := len(sortedPeers)
-	if topN > 10 {
-		topN = 10
-	}
-
-	fmt.Printf("Top %d most active peers:\n", topN)
-	fmt.Println("IP Address\t\tHandshakes\tConnections\tLast Seen")
-	fmt.Println("----------\t\t----------\t-----------\t---------")
-
-	for i := 0; i < topN; i++ {
-		peer := sortedPeers[i]
-		fmt.Printf("%-20s\t%d\t\t%d\t\t%s\n",
-			peer.IP,
-			peer.Stats.Handshakes,
-			peer.Stats.Connections,
-			peer.Stats.LastSeen.Format("15:04:05"))
-	}
-
-	fmt.Println("==================================")
-
-	// Save top peers to file for XDC node static peer list
-	peerdDir, err := getPeerdDir()
-	if err != nil {
-		log.Printf("Error getting .peerd directory: %v", err)
-		return
-	}
-
-	peersFile := filepath.Join(peerdDir, "top-peers.json")
-
-	// Prepare data for JSON output
-	type PeerInfo struct {
-		IP          string    `json:"ip"`
-		Handshakes  int       `json:"handshakes"`
-		Connections int       `json:"connections"`
-		LastSeen    time.Time `json:"last_seen"`
-		Score       float64   `json:"score"` // A composite score based on activity
-	}
-
-	var topPeers []PeerInfo
-	for i := 0; i < topN; i++ {
-		peer := sortedPeers[i]
-
-		// Calculate a simple score based on handshakes and recency
-		score := float64(peer.Stats.Handshakes)*0.7 +
-			float64(peer.Stats.Connections)*0.3
-
-		// Boost score for recently active peers
-		timeSinceLastSeen := time.Since(peer.Stats.LastSeen).Minutes()
-		if timeSinceLastSeen < 10 { // Active in last 10 minutes
-			score *= 1.2
-		} else if timeSinceLastSeen < 30 { // Active in last 30 minutes
-			score *= 1.1
-		}
-
-		topPeers = append(topPeers, PeerInfo{
-			IP:          peer.IP,
-			Handshakes:  peer.Stats.Handshakes,
-			Connections: peer.Stats.Connections,
-			LastSeen:    peer.Stats.LastSeen,
-			Score:       score,
-		})
-	}
-
-	// Marshal the data
-	jsonData, marshalErr := json.MarshalIndent(topPeers, "", "  ")
-	if marshalErr != nil {
-		log.Printf("Error marshaling top peers: %v", marshalErr)
-		return
-	}
-
-	// Write to file
-	if writeErr := os.WriteFile(peersFile, jsonData, 0644); writeErr != nil {
-		log.Printf("Error writing top peers to file: %v", writeErr)
-		return
-	}
-
-	log.Printf("Saved top %d peers to %s", len(topPeers), peersFile)
-}
-
-// analyzeXDCPayloadSafe analyzes the payload to determine if it's XDC traffic
-func analyzeXDCPayloadSafe(
-	payload []byte,
-	srcIP string,
-	dstIP string,
-	srcPort string,
-	dstPort string,
-	protocol string,
-) (bool, types.XDCPacketInfo) {
-
-	if len(payload) == 0 {
-		return false, types.XDCPacketInfo{Type: types.Unknown, Details: "empty payload"}
-	}
-
+// isXDCTraffic determines if traffic is XDC based on port ranges and local IP considerations
+func isXDCTraffic(srcIP string, dstIP string, srcPort string, dstPort string) bool {
 	// Parse the source and destination ports to integers
 	srcPortInt := types.ParseIntPort(srcPort)
 	dstPortInt := types.ParseIntPort(dstPort)
@@ -485,52 +392,65 @@ func analyzeXDCPayloadSafe(
 			(dstPortInt >= 30000 && dstPortInt <= 65535)
 	}
 
-	// If not in XDC port range, return false early
-	if !isInXDPortRange {
-		return false, types.XDCPacketInfo{Type: types.Unknown, Details: "port not in XDC range (30000-65535)"}
-	}
+	return isInXDPortRange
+}
 
-	// --- 1. DevP2P ECIES handshake (unencrypted) ---
-	// Auth / Ack packets are fixed-size-ish and NOT random
-	// They always begin with ECIES data, not ASCII or RLP
-	if types.LooksLikeDevP2PHandshake(payload) {
-		return true, types.XDCPacketInfo{
-			Type:     types.DevP2PHandshake,
-			Details:  "DevP2P ECIES handshake",
+// classifyPacketType classifies packets as handshake, ping/pong, or block messages
+func classifyPacketType(
+	payload []byte,
+	srcIP string,
+	dstIP string,
+	srcPort string,
+	dstPort string,
+	protocol string,
+) types.XDCPacketInfo {
+	// Protocol-aware classification to avoid mislabeling UDP discovery as DevP2P handshake
+	if protocol == "TCP" {
+		if types.LooksLikeDevP2PHandshake(payload) {
+			return types.XDCPacketInfo{
+				Type:     types.DevP2PHandshake,
+				Details:  "DevP2P ECIES handshake",
+				PeerIP:   srcIP,
+				PeerPort: srcPort,
+				PeerID:   "",
+			}
+		}
+		// Other TCP encrypted traffic assumed to be RLPx frames
+		return types.XDCPacketInfo{
+			Type:     types.EncryptedRLPx,
+			Details:  "Encrypted RLPx frame (requires decryption)",
 			PeerIP:   srcIP,
 			PeerPort: srcPort,
 			PeerID:   "",
 		}
 	}
 
-	// --- 2. Discovery v5 (cryptographically signed UDP packets) ---
-	if types.LooksLikeDiscV5(payload) {
-		return true, types.XDCPacketInfo{
-			Type:     types.DiscV5,
-			Details:  "Discovery v5 packet",
-			PeerIP:   srcIP,
-			PeerPort: srcPort,
-			PeerID:   "",
+	// UDP path — handle Discovery protocols first
+	if protocol == "UDP" {
+		if types.LooksLikeDiscV5(payload) {
+			return types.XDCPacketInfo{
+				Type:     types.DiscV5,
+				Details:  "Discovery v5 packet",
+				PeerIP:   srcIP,
+				PeerPort: srcPort,
+				PeerID:   "",
+			}
+		}
+		if types.LooksLikeDiscV4(payload) {
+			return types.XDCPacketInfo{
+				Type:     types.DiscV4,
+				Details:  "Discovery v4 packet",
+				PeerIP:   srcIP,
+				PeerPort: srcPort,
+				PeerID:   "",
+			}
 		}
 	}
 
-	// --- 3. Discovery v4 ---
-	if types.LooksLikeDiscV4(payload) {
-		return true, types.XDCPacketInfo{
-			Type:     types.DiscV4,
-			Details:  "Discovery v4 packet",
-			PeerIP:   srcIP,
-			PeerPort: srcPort,
-			PeerID:   "",
-		}
-	}
-
-	// --- 4. Everything else is encrypted RLPx ---
-	// We DO NOT attempt to decode it
-
-	return protocol == "TCP", types.XDCPacketInfo{
-		Type:     types.EncryptedRLPx,
-		Details:  "Encrypted RLPx frame (opaque)",
+	// Fallback
+	return types.XDCPacketInfo{
+		Type:     types.Unknown,
+		Details:  "Non-XDC or unrecognized packet",
 		PeerIP:   srcIP,
 		PeerPort: srcPort,
 		PeerID:   "",

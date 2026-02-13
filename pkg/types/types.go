@@ -28,13 +28,17 @@ type XDCPacketInfo struct {
 
 // PeerActivity tracks activity for a specific peer
 type PeerActivity struct {
-	IP            string
-	LastSeen      time.Time
-	Connections   int
-	Handshakes    int
-	BytesSent     int64
-	BytesReceived int64
-	Active        bool
+	IP             string
+	PeerID         string
+	LastSeen       time.Time
+	Connections    int
+	Handshakes     int
+	DiscoveryCount int
+	DataCount      int
+	BytesSent      int64
+	BytesReceived  int64
+	Active         bool
+	Score          float64
 }
 
 // parseIntPort converts a port string to an integer
@@ -44,61 +48,45 @@ func ParseIntPort(portStr string) int {
 	return port
 }
 
-// IsLocalIP checks if an IP address belongs to any of the local network interfaces
+var cgnatBlock = mustCIDR("100.64.0.0/10")
+
+// IsLocalIP checks if an IP address is a private/local address
 func IsLocalIP(ipAddr string) bool {
-	// Parse the IP address
 	ip := net.ParseIP(ipAddr)
 	if ip == nil {
 		return false
 	}
 
-	// Get all network interfaces
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return false
+	// Check if it's a private/reserved/local IP address
+	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
 	}
-
-	// Check each interface
-	for _, iface := range interfaces {
-		// Skip down interfaces
-		if iface.Flags&net.FlagUp == 0 {
-			continue
-		}
-
-		// Get addresses for this interface
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-
-		// Check each address
-		for _, addr := range addrs {
-			switch v := addr.(type) {
-			case *net.IPNet:
-				if v.Contains(ip) {
-					return true
-				}
-			case *net.IPAddr:
-				if v.IP.Equal(ip) {
-					return true
-				}
-			}
-		}
+	if cgnatBlock.Contains(ip) {
+		return true
 	}
-
 	return false
+}
+func mustCIDR(c string) *net.IPNet {
+	_, block, err := net.ParseCIDR(c)
+	if err != nil {
+		panic(err)
+	}
+	return block
 }
 
 // LooksLikeDevP2PHandshake checks if the payload looks like a DevP2P handshake
 func LooksLikeDevP2PHandshake(b []byte) bool {
-	// ECIES auth / ack sizes are predictable-ish
-	// Auth ≈ 194 bytes, Ack ≈ 97 bytes (varies slightly)
-	if len(b) < 90 || len(b) > 300 {
+	// ECIES auth / ack sizes are predictable
+	// Raw Auth ≈ 194 bytes, Raw Ack ≈ 97 bytes
+	// Encrypted Auth ≈ 307 bytes, Encrypted Ack ≈ 210 bytes (with ECIES overhead)
+	// We should accept a range that covers both raw and encrypted handshake packets
+	if len(b) < 50 || len(b) > 500 {
 		return false
 	}
 
-	// Without entropy check, we rely on size alone for now
-	// Could add other heuristics later if needed
+	// For now, we'll use size as a primary indicator but acknowledge that
+	// encrypted handshake packets are larger due to ECIES overhead
+	// Additional checks could be added later for more accuracy
 	return true
 }
 

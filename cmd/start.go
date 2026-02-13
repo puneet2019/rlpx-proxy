@@ -9,11 +9,13 @@ import (
 	"path/filepath"
 	"time"
 
+	"peer-sniffer/pkg/logger"
+	"peer-sniffer/pkg/types"
+
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 	"github.com/spf13/cobra"
-	"peer-sniffer/pkg/types"
 )
 
 var startCmd = &cobra.Command{
@@ -26,18 +28,15 @@ var startCmd = &cobra.Command{
 			return
 		}
 
-		xdcOnly, _ := cmd.Flags().GetBool("xdc-only")
-
-		startMonitoring(xdcOnly)
+		startMonitoring()
 	},
 }
 
 func init() {
-	startCmd.Flags().Bool("xdc-only", false, "Log only XDC traffic")
 	rootCmd.AddCommand(startCmd)
 }
 
-func startMonitoring(xdcOnly bool) {
+func startMonitoring() {
 	// Open the device for packet capture on any interface
 	handle, err := pcap.OpenLive("any", 1600, true, pcap.BlockForever)
 	if err != nil {
@@ -52,11 +51,7 @@ func startMonitoring(xdcOnly bool) {
 	}
 
 	fmt.Printf("Starting XDC packet capture on any interface...\n")
-	if xdcOnly {
-		fmt.Println("Monitoring only XDC traffic...")
-	} else {
-		fmt.Println("Monitoring all TCP/UDP traffic...")
-	}
+	fmt.Println("Monitoring all TCP/UDP traffic...")
 
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 
@@ -122,10 +117,7 @@ func startMonitoring(xdcOnly bool) {
 				// It will also consider localhost connections when determining XDC traffic
 				isXDCResult, resp = analyzeXDCPayloadSafeShared(payload, srcIP, dstIP, srcPort, dstPort, protocol)
 
-				// Skip non-XDC traffic if xdc-only is enabled
-				if xdcOnly && !isXDCResult {
-					continue
-				}
+				// Process all traffic regardless of XDC status
 
 				if len(data) > 100 {
 					data = data[:100] + "... (truncated)"
@@ -148,19 +140,14 @@ func startMonitoring(xdcOnly bool) {
 			"size":      len(packet.Data()),
 		}
 
-		// Log the packet info as JSON
-		jsonData, err := json.Marshal(packetInfo)
-		if err != nil {
-			log.Printf("Error marshaling packet info: %v", err)
-			continue
-		}
+		// Create logger instance for this function
+		loggerInstance := logger.NewLogger("json") // Default to JSON for this command
 
-		if xdcOnly {
-			if isXDCResult {
-				fmt.Println(string(jsonData))
-			}
+		// Log the packet based on its XDC status
+		if isXDCResult {
+			loggerInstance.LogXDCPacket(packetInfo)
 		} else {
-			fmt.Println(string(jsonData))
+			loggerInstance.LogNonXDCPacket(packetInfo)
 		}
 
 		// Update peer data for storage
@@ -266,6 +253,10 @@ func analyzeXDCPayloadSafeShared(
 	// Check if either endpoint is a local IP
 	isSrcLocal := types.IsLocalIP(srcIP)
 	isDstLocal := types.IsLocalIP(dstIP)
+
+	if isSrcLocal && isDstLocal {
+		return false, types.XDCPacketInfo{Type: types.Unknown, Details: "internal communication"}
+	}
 
 	// Check if either port is in XDC range (30000-65535)
 	var isInXDPortRange bool

@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: xdc-peer-sniffer
     # Capture traffic related to XDC communications
-    command: ["start2", "--track-handshakes=true", "--output=json", "--xdc-only=true"]
+    command: [ "start2", "--track-handshakes=true", "--output=json" ]
     network_mode: "host"  # Required for packet capture on all interfaces
     volumes:
       - ./peerd-data:/root/.peerd  # Mount volume to persist peer data
@@ -18,13 +18,14 @@ services:
     restart: unless-stopped
     environment:
       - HOME=/root
+      - XDC_PRIVATE_KEY=e7064463b0d8670605f55f2ee4f7718eb17f4827b6b7f72ddaa88e8d03df15c2
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
 
-  xdc-node:  # Your XDC node service
+  xdc-node: # Your XDC node service
     image: xinfinorg/xdposchain:v2.6.8  # Replace with your actual XDC node image
     container_name: xdc-node
     environment:
