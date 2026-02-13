@@ -1,10 +1,19 @@
 # Example docker-compose.yml for running rlpx-proxy with an XDC node.
-# Copy this file to the project root, create a .env file with your keys,
-# and run: docker compose up -d --build
+#
+# Setup:
+#   1. cd example/
+#   2. cp .env.example .env  (fill in your keys)
+#   3. Create a static-nodes.json with enode URLs to connect to
+#   4. docker compose up -d --build
+#
+# The rlpx-proxy Dockerfile is in the parent directory (the Go project root).
 
 services:
   xdc-node:
-    image: xinfinorg/xdposchain:v2.6.8
+    build:
+      context: .
+      dockerfile: Dockerfile.xdc-arm64
+    image: xdposchain-arm64:v2.6.8
     expose:
       - "30303/tcp"
     ports:
@@ -18,7 +27,9 @@ services:
       - ./xdc-data:/work/xdcchain
 
   rlpx-proxy:
-    build: .
+    build:
+      context: ..
+      dockerfile: Dockerfile
     ports:
       - "30303:30303/tcp"
     environment:
