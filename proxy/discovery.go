@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"strconv"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/p2p/discover"
@@ -181,35 +180,3 @@ func ParseBootnodes(enodes []string) []*enode.Node {
 	return nodes
 }
 
-// UpstreamBootnode constructs an enode.Node from the upstream node's public key
-// and address, for use as a discovery bootstrap node.
-func UpstreamBootnode(nodeKey *ecdsa.PrivateKey, upstreamAddr string) (*enode.Node, error) {
-	host, portStr, err := net.SplitHostPort(upstreamAddr)
-	if err != nil {
-		return nil, fmt.Errorf("split upstream addr: %w", err)
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return nil, fmt.Errorf("parse port: %w", err)
-	}
-
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		return nil, fmt.Errorf("resolve %s: %w", host, err)
-	}
-	var ip net.IP
-	for _, addr := range ips {
-		if v4 := addr.To4(); v4 != nil {
-			ip = v4
-			break
-		}
-	}
-	if ip == nil && len(ips) > 0 {
-		ip = ips[0]
-	}
-	if ip == nil {
-		return nil, fmt.Errorf("no IP addresses for %s", host)
-	}
-
-	return enode.NewV4(&nodeKey.PublicKey, ip, port, port), nil
-}

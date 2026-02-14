@@ -1,6 +1,10 @@
 package proxy
 
-import "github.com/ethereum/go-ethereum/rlp"
+import (
+	"fmt"
+
+	"github.com/ethereum/go-ethereum/rlp"
+)
 
 // DevP2P base protocol message codes.
 const (
@@ -41,24 +45,6 @@ func decodeHello(data []byte) (*Hello, error) {
 	return &h, nil
 }
 
-// defaultXDCCaps returns the capability set advertised by XDC nodes.
-func defaultXDCCaps() []Cap {
-	return []Cap{
-		{Name: "eth", Version: 62},
-		{Name: "eth", Version: 63},
-		{Name: "eth", Version: 100},
-	}
-}
-
-// defaultEthCaps returns the capability set for modern Ethereum nodes.
-func defaultEthCaps() []Cap {
-	return []Cap{
-		{Name: "eth", Version: 67},
-		{Name: "eth", Version: 68},
-		{Name: "snap", Version: 1},
-	}
-}
-
 // allCaps returns a combined capability set that works with both XDC and
 // Ethereum nodes. The remote peer negotiates to the highest common version.
 func allCaps() []Cap {
@@ -91,4 +77,36 @@ func negotiateEthVersion(peerCaps []Cap) uint32 {
 		return 63 // fallback
 	}
 	return uint32(best)
+}
+
+var disconnectReasons = map[uint]string{
+	0x00: "requested",
+	0x01: "TCP error",
+	0x02: "protocol breach",
+	0x03: "useless peer",
+	0x04: "too many peers",
+	0x05: "already connected",
+	0x06: "incompatible p2p version",
+	0x07: "invalid node identity",
+	0x08: "client quitting",
+	0x09: "unexpected identity",
+	0x0a: "connected to self",
+	0x0b: "read timeout",
+	0x10: "subprotocol error",
+}
+
+func decodeDisconnectReason(data []byte) string {
+	var reasons []uint
+	if err := rlp.DecodeBytes(data, &reasons); err == nil && len(reasons) > 0 {
+		if name, ok := disconnectReasons[reasons[0]]; ok {
+			return name
+		}
+		return fmt.Sprintf("unknown(%d)", reasons[0])
+	}
+	if len(data) == 1 {
+		if name, ok := disconnectReasons[uint(data[0])]; ok {
+			return name
+		}
+	}
+	return fmt.Sprintf("raw:%x", data)
 }

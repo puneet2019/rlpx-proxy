@@ -16,6 +16,11 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
+const (
+	handshakeTimeout = 10 * time.Second
+	writeTimeout     = 20 * time.Second
+)
+
 // sessionResult describes what happened during a connection attempt.
 type sessionResult int
 
@@ -40,7 +45,6 @@ type monitorSession struct {
 	store       *PeerStore
 	cache       *BlockCache
 	broadcaster *Broadcaster
-	propagate   bool
 }
 
 // runMonitorPool consumes discovered nodes and maintains persistent connections.
@@ -90,7 +94,6 @@ func (s *Server) runMonitorPool(ctx context.Context, peerCh <-chan *enode.Node) 
 					store:       s.store,
 					cache:       s.cache,
 					broadcaster: s.broadcaster,
-					propagate:   s.cfg.Propagate,
 				}
 				ms.connectLoop(ctx, pubkey, addr, enodePort, sem)
 			}(pubkey, addr, port)
@@ -302,12 +305,9 @@ func (ms *monitorSession) runSession(ctx context.Context, pubkey *ecdsa.PublicKe
 		return sessionBrief
 	}
 
-	// Register with broadcaster for propagation.
-	var broadcastCh chan BroadcastMsg
-	if ms.propagate && ms.broadcaster != nil {
-		broadcastCh = ms.broadcaster.Register(addr)
-		defer ms.broadcaster.Unregister(addr)
-	}
+	// Register with broadcaster for gossip propagation.
+	broadcastCh := ms.broadcaster.Register(addr)
+	defer ms.broadcaster.Unregister(addr)
 
 	// Phase 5: Message loop.
 	if ms.messageLoop(ctx, conn, addr, peerID, broadcastCh) {
@@ -387,32 +387,24 @@ func (ms *monitorSession) messageLoop(ctx context.Context, conn *rlpx.Conn, addr
 				ms.store.RecordHead(addr, blockNum, blockHash)
 				log.Printf("[monitor→%s] new block #%d %s", addr, blockNum, blockHash.Hex()[:10])
 			}
-			// Propagate to other peers.
-			if ms.propagate && ms.broadcaster != nil {
-				ms.broadcaster.Broadcast(BroadcastMsg{
-					Code: NewBlockMsg, Data: data, Sender: addr,
-				})
-			}
+			ms.broadcaster.Broadcast(BroadcastMsg{
+				Code: NewBlockMsg, Data: data, Sender: addr,
+			})
 
 		case NewBlockHashesMsg:
 			useful = true
-			// Parse block number from NewBlockHashes: [[hash, number], ...]
 			if blockNum, hash, ok := parseNewBlockHashes(data); ok {
 				ms.store.RecordHead(addr, blockNum, hash)
 			}
-			if ms.propagate && ms.broadcaster != nil {
-				ms.broadcaster.Broadcast(BroadcastMsg{
-					Code: NewBlockHashesMsg, Data: data, Sender: addr,
-				})
-			}
+			ms.broadcaster.Broadcast(BroadcastMsg{
+				Code: NewBlockHashesMsg, Data: data, Sender: addr,
+			})
 
 		case TxMsg:
 			useful = true
-			if ms.propagate && ms.broadcaster != nil {
-				ms.broadcaster.Broadcast(BroadcastMsg{
-					Code: TxMsg, Data: data, Sender: addr,
-				})
-			}
+			ms.broadcaster.Broadcast(BroadcastMsg{
+				Code: TxMsg, Data: data, Sender: addr,
+			})
 
 		case GetBlockHeadersMsg:
 			// Respond with headers from cache, or empty.

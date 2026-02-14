@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"os"
 	"os/signal"
@@ -18,7 +17,7 @@ import (
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.LUTC)
 
-	// Load the real node's private key from env.
+	// Load the node's private key from env.
 	nodeKeyHex := os.Getenv("NODE_PRIVATE_KEY")
 	if nodeKeyHex == "" {
 		log.Fatal("NODE_PRIVATE_KEY env var is required")
@@ -29,40 +28,7 @@ func main() {
 	}
 	log.Printf("node pubkey: %x", crypto.FromECDSAPub(&nodeKey.PublicKey)[1:])
 
-	// Generate a random proxy key for the upstream side.
-	proxyKey, err := crypto.GenerateKey()
-	if err != nil {
-		log.Fatalf("generate proxy key: %v", err)
-	}
-
-	// Upstream is now optional (standalone monitor mode).
-	upstreamHost := os.Getenv("UPSTREAM_HOST")
-	upstreamPort := envOrDefault("UPSTREAM_PORT", "30303")
-	listenPort := envOrDefault("LISTEN_PORT", "30303")
-
-	var upstreamAddr string
-	if upstreamHost != "" {
-		upstreamAddr = upstreamHost + ":" + upstreamPort
-	}
-
-	// Load outbound peers from PEERS_FILE (JSON array of enode URLs).
-	var peers []*proxy.Peer
-	if peersFile := os.Getenv("PEERS_FILE"); peersFile != "" {
-		peers, err = loadPeersFile(peersFile)
-		if err != nil {
-			log.Fatalf("load peers file: %v", err)
-		}
-		log.Printf("loaded %d outbound peers from %s", len(peers), peersFile)
-	}
-
-	maxOutbound := 100
-	if v := os.Getenv("MAX_OUTBOUND"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			maxOutbound = n
-		}
-	}
-
-	// Optional: explicit bootnodes for discovery.
+	// Load bootnodes for discovery.
 	var bootnodes = proxy.ParseBootnodes(splitNonEmpty(os.Getenv("BOOTNODES"), ","))
 	if bnFile := os.Getenv("BOOTNODES_FILE"); bnFile != "" {
 		fileNodes, err := loadBootnodesFile(bnFile)
@@ -75,35 +41,24 @@ func main() {
 		log.Printf("loaded %d bootnodes", len(bootnodes))
 	}
 
+	maxOutbound := 100
+	if v := os.Getenv("MAX_OUTBOUND"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxOutbound = n
+		}
+	}
+
 	discoveryAddr := envOrDefault("DISCOVERY_ADDR", ":30301")
 	discoveryV5Addr := envOrDefault("DISCOVERY_V5_ADDR", ":30302")
-
-	// Monitor mode config.
-	propagate := true
-	if v := os.Getenv("PROPAGATE"); v != "" {
-		propagate = v == "true" || v == "1" || v == "yes"
-	}
-
 	apiAddr := envOrDefault("API_ADDR", ":8080")
 
-	upstreamRPC := os.Getenv("UPSTREAM_RPC")
-	if upstreamRPC == "" && upstreamHost != "" {
-		upstreamRPC = "http://" + upstreamHost + ":8545"
-	}
-
 	cfg := proxy.Config{
-		ListenAddr:    ":" + listenPort,
-		UpstreamAddr:  upstreamAddr,
-		NodeKey:       nodeKey,
-		ProxyKey:      proxyKey,
-		Peers:         peers,
-		MaxOutbound:   maxOutbound,
+		NodeKey:         nodeKey,
+		MaxOutbound:     maxOutbound,
 		DiscoveryAddr:   discoveryAddr,
 		DiscoveryV5Addr: discoveryV5Addr,
-		Bootnodes:     bootnodes,
-		Propagate:     propagate,
-		APIAddr:       apiAddr,
-		UpstreamRPC:   upstreamRPC,
+		Bootnodes:       bootnodes,
+		APIAddr:         apiAddr,
 	}
 
 	srv := proxy.NewServer(cfg)
@@ -123,27 +78,6 @@ func main() {
 	if err := srv.ListenAndServe(ctx); err != nil {
 		log.Fatalf("server: %v", err)
 	}
-}
-
-func loadPeersFile(path string) ([]*proxy.Peer, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var enodes []string
-	if err := json.Unmarshal(data, &enodes); err != nil {
-		return nil, err
-	}
-	var peers []*proxy.Peer
-	for _, e := range enodes {
-		p, err := proxy.ParseEnode(e)
-		if err != nil {
-			log.Printf("skipping invalid enode: %v", err)
-			continue
-		}
-		peers = append(peers, p)
-	}
-	return peers, nil
 }
 
 func envOrDefault(key, def string) string {

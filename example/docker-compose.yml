@@ -15,7 +15,6 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "30303:30303/tcp"   # P2P listen (inbound peers)
       - "30301:30301/udp"   # discv4 discovery
       - "30302:30302/udp"   # discv5 discovery
       - "8080:8080"         # HTTP API
@@ -24,7 +23,6 @@ services:
       - DISCOVERY_ADDR=:30301
       - DISCOVERY_V5_ADDR=:30302
       - MAX_OUTBOUND=${MAX_OUTBOUND:-100}
-      - PROPAGATE=${PROPAGATE:-true}
       - API_ADDR=:8080
       - BOOTNODES_FILE=/bootnodes.txt
     volumes:

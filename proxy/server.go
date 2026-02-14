@@ -5,21 +5,15 @@ import (
 	"crypto/ecdsa"
 	"fmt"
 	"log"
-	"net"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/p2p/enode"
 )
 
-// Config holds the proxy server configuration.
+// Config holds the server configuration.
 type Config struct {
-	ListenAddr   string            // e.g. ":30303"
-	UpstreamAddr string            // e.g. "host:30303" (optional, enables relay proxy mode)
-	NodeKey      *ecdsa.PrivateKey // real node's private key (external side)
-	ProxyKey     *ecdsa.PrivateKey // random key (internal/upstream side)
-	Peers        []*Peer           // outbound peers to actively connect to
-	MaxOutbound  int               // max concurrent outbound/monitor connections (default 100)
+	NodeKey *ecdsa.PrivateKey // node's P2P identity key
 
 	// Discovery
 	DiscoveryAddr   string        // UDP listen address for discv4 (e.g. ":30301")
@@ -27,17 +21,13 @@ type Config struct {
 	Bootnodes       []*enode.Node // bootstrap nodes
 
 	// Monitor
-	Propagate bool   // forward NewBlock/NewBlockHashes/Txns between peers
-	APIAddr   string // HTTP API listen address (e.g. ":8080")
-
-	// Relay proxy (only used if UpstreamAddr is set)
-	UpstreamRPC string // HTTP RPC URL of upstream node
+	MaxOutbound int    // max concurrent outbound connections (default 100)
+	APIAddr     string // HTTP API listen address (e.g. ":8080")
 }
 
-// Server is the RLPx peer health monitor and optional MitM proxy.
+// Server is the RLPx peer health monitor and gossip bridge.
 type Server struct {
 	cfg         Config
-	listener    net.Listener
 	wg          sync.WaitGroup
 	discovery   *Discovery
 	store       *PeerStore
@@ -55,7 +45,7 @@ func NewServer(cfg Config) *Server {
 	}
 }
 
-// ListenAndServe starts the monitor, optional proxy listener, and API.
+// ListenAndServe starts discovery, the monitor pool, and the HTTP API.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	// Start HTTP API.
 	apiAddr := s.cfg.APIAddr
@@ -65,23 +55,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	log.Printf("[api] starting HTTP API on %s", apiAddr)
 	StartAPI(apiAddr, s)
 
-	// Start outbound relay connections if peers and upstream are configured.
-	if len(s.cfg.Peers) > 0 && s.cfg.UpstreamAddr != "" {
-		log.Printf("starting outbound relay connections to %d peers", len(s.cfg.Peers))
-		s.connectOutbound(ctx, s.cfg.Peers)
-	}
-
 	// Start discovery + monitor pool.
 	bootnodes := s.cfg.Bootnodes
-	if len(bootnodes) == 0 && s.cfg.UpstreamAddr != "" {
-		upNode, err := UpstreamBootnode(s.cfg.NodeKey, s.cfg.UpstreamAddr)
-		if err != nil {
-			log.Printf("[discovery] auto-bootstrap failed: %v (set BOOTNODES_FILE to override)", err)
-		} else {
-			bootnodes = []*enode.Node{upNode}
-			log.Printf("[discovery] auto-bootstrapping from upstream node: %s", upNode.URLv4())
-		}
-	}
 	if len(bootnodes) > 0 {
 		v4Addr := s.cfg.DiscoveryAddr
 		if v4Addr == "" {
@@ -109,48 +84,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		}()
 	}
 
-	// Only start TCP listener if upstream is configured (proxy mode).
-	if s.cfg.UpstreamAddr != "" {
-		var err error
-		s.listener, err = net.Listen("tcp", s.cfg.ListenAddr)
-		if err != nil {
-			return err
-		}
-		log.Printf("listening on %s, upstream %s", s.cfg.ListenAddr, s.cfg.UpstreamAddr)
-
-		go func() {
-			<-ctx.Done()
-			s.listener.Close()
-		}()
-
-		for {
-			conn, err := s.listener.Accept()
-			if err != nil {
-				select {
-				case <-ctx.Done():
-					s.wg.Wait()
-					return nil
-				default:
-					log.Printf("accept error: %v", err)
-					continue
-				}
-			}
-			s.wg.Add(1)
-			go func() {
-				defer s.wg.Done()
-				sess := &session{
-					extConn:      conn,
-					upstreamAddr: s.cfg.UpstreamAddr,
-					nodeKey:      s.cfg.NodeKey,
-					proxyKey:     s.cfg.ProxyKey,
-				}
-				sess.run(ctx)
-			}()
-		}
-	}
-
-	// Monitor-only mode: block until context is done.
-	log.Printf("running in standalone monitor mode (no upstream)")
+	log.Printf("running in standalone monitor mode")
 	<-ctx.Done()
 	s.wg.Wait()
 	return nil
