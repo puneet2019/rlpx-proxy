@@ -7,9 +7,11 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/puneetmahajan/rlpx-proxy/proxy"
 )
 
@@ -32,11 +34,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("generate proxy key: %v", err)
 	}
-	log.Printf("proxy pubkey: %x", crypto.FromECDSAPub(&proxyKey.PublicKey)[1:])
 
-	upstreamHost := envOrDefault("UPSTREAM_HOST", "xdc-node")
+	// Upstream is now optional (standalone monitor mode).
+	upstreamHost := os.Getenv("UPSTREAM_HOST")
 	upstreamPort := envOrDefault("UPSTREAM_PORT", "30303")
 	listenPort := envOrDefault("LISTEN_PORT", "30303")
+
+	var upstreamAddr string
+	if upstreamHost != "" {
+		upstreamAddr = upstreamHost + ":" + upstreamPort
+	}
 
 	// Load outbound peers from PEERS_FILE (JSON array of enode URLs).
 	var peers []*proxy.Peer
@@ -48,20 +55,53 @@ func main() {
 		log.Printf("loaded %d outbound peers from %s", len(peers), peersFile)
 	}
 
-	maxOutbound := 10
+	maxOutbound := 100
 	if v := os.Getenv("MAX_OUTBOUND"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			maxOutbound = n
 		}
 	}
 
+	// Optional: explicit bootnodes for discovery.
+	var bootnodes = proxy.ParseBootnodes(splitNonEmpty(os.Getenv("BOOTNODES"), ","))
+	if bnFile := os.Getenv("BOOTNODES_FILE"); bnFile != "" {
+		fileNodes, err := loadBootnodesFile(bnFile)
+		if err != nil {
+			log.Fatalf("load bootnodes file: %v", err)
+		}
+		bootnodes = append(bootnodes, fileNodes...)
+	}
+	if len(bootnodes) > 0 {
+		log.Printf("loaded %d bootnodes", len(bootnodes))
+	}
+
+	discoveryAddr := envOrDefault("DISCOVERY_ADDR", ":30301")
+
+	// Monitor mode config.
+	propagate := true
+	if v := os.Getenv("PROPAGATE"); v != "" {
+		propagate = v == "true" || v == "1" || v == "yes"
+	}
+
+	apiAddr := envOrDefault("API_ADDR", ":8080")
+
+	upstreamRPC := os.Getenv("UPSTREAM_RPC")
+	if upstreamRPC == "" && upstreamHost != "" {
+		upstreamRPC = "http://" + upstreamHost + ":8545"
+	}
+
 	cfg := proxy.Config{
-		ListenAddr:   ":" + listenPort,
-		UpstreamAddr: upstreamHost + ":" + upstreamPort,
-		NodeKey:      nodeKey,
-		ProxyKey:     proxyKey,
-		Peers:        peers,
-		MaxOutbound:  maxOutbound,
+		ListenAddr:    ":" + listenPort,
+		UpstreamAddr:  upstreamAddr,
+		NodeKey:       nodeKey,
+		ProxyKey:      proxyKey,
+		Peers:         peers,
+		MaxOutbound:   maxOutbound,
+		DiscoveryAddr: discoveryAddr,
+		Bootnodes:     bootnodes,
+		Propagate:     propagate,
+		APIAddr:       apiAddr,
+		UpstreamRPC:   upstreamRPC,
 	}
 
 	srv := proxy.NewServer(cfg)
@@ -109,4 +149,35 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func loadBootnodesFile(path string) ([]*enode.Node, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var enodes []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			enodes = append(enodes, line)
+		}
+	}
+	nodes := proxy.ParseBootnodes(enodes)
+	log.Printf("loaded %d bootnodes from %s", len(nodes), path)
+	return nodes, nil
+}
+
+func splitNonEmpty(s, sep string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, sep)
+	out := parts[:0]
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }

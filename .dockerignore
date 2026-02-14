@@ -1,0 +1,8 @@
+xdc-data/
+example/
+build/
+.git/
+.env
+*.json
+*.list
+PLAN.md

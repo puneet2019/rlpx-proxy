@@ -202,15 +202,15 @@ func readInput() {
 		}
 
 		switch ev.Event {
-		case "connect":
+		case "connect", "probe_connect":
 			p.PeerID = ev.PeerID
 			p.ClientName = ev.ClientName
 			p.Enode = fmt.Sprintf("enode://%s@%s", ev.PeerID, ev.Peer)
 			p.Sessions++
 			p.LastSeen = ts
-		case "disconnect":
+		case "disconnect", "probe_disconnect":
 			p.LastSeen = ts
-		case "msg", "":
+		case "msg", "probe_msg", "":
 			name := msgName(ev.MsgCode)
 			p.MsgCounts[name]++
 			p.TotalMsgs++

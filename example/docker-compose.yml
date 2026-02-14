@@ -1,12 +1,14 @@
-# Example docker-compose.yml for running rlpx-proxy with an XDC node.
+# docker-compose.yml for running rlpx-proxy as a standalone peer monitor.
+#
+# The XDC node is optional — the monitor can run standalone with just bootnodes.
 #
 # Setup:
 #   1. cd example/
 #   2. cp .env.example .env  (fill in your keys)
-#   3. Create a static-nodes.json with enode URLs to connect to
-#   4. docker compose up -d --build
+#   3. docker compose up -d --build
 #
-# The rlpx-proxy Dockerfile is in the parent directory (the Go project root).
+# Standalone (no XDC node):
+#   docker compose up -d --build rlpx-proxy
 
 services:
   xdc-node:
@@ -14,6 +16,9 @@ services:
       context: .
       dockerfile: Dockerfile.xdc-arm64
     image: xdposchain-arm64:v2.6.8
+    restart: unless-stopped
+    profiles:
+      - with-upstream
     expose:
       - "30303/tcp"
     ports:
@@ -23,22 +28,30 @@ services:
       - NETWORK=mainnet
       - PRIVATE_KEY=${ACCOUNT_KEY}
       - XDC_NODEKEYHEX=${NODE_P2P_KEY}
+      - SYNC_MODE=full
+      - GC_MODE=archive
     volumes:
-      - ./xdc-data:/work/xdcchain
+      - xdc-data:/work/xdcchain
+      - ./start-xdc.sh:/work/start.sh:ro
 
   rlpx-proxy:
     build:
       context: ..
       dockerfile: Dockerfile
+    restart: unless-stopped
     ports:
       - "30303:30303/tcp"
+      - "30301:30301/udp"
+      - "8080:8080"
     environment:
       - NODE_PRIVATE_KEY=${NODE_P2P_KEY}
-      - UPSTREAM_HOST=xdc-node
-      - UPSTREAM_PORT=30303
-      - PEERS_FILE=/etc/rlpx-proxy/peers.json
-      - MAX_OUTBOUND=10
+      - DISCOVERY_ADDR=:30301
+      - MAX_OUTBOUND=${MAX_OUTBOUND:-100}
+      - PROPAGATE=${PROPAGATE:-true}
+      - API_ADDR=:8080
+      - BOOTNODES_FILE=/bootnodes.txt
     volumes:
-      - ./static-nodes.json:/etc/rlpx-proxy/peers.json:ro
-    depends_on:
-      - xdc-node
+      - ./xdc-bootnodes.txt:/bootnodes.txt:ro
+
+volumes:
+  xdc-data:

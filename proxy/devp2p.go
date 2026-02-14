@@ -71,3 +71,24 @@ func allCaps() []Cap {
 		{Name: "snap", Version: 1},
 	}
 }
+
+// negotiateEthVersion returns the highest common eth protocol version
+// between our caps and the peer's caps.
+func negotiateEthVersion(peerCaps []Cap) uint32 {
+	ours := make(map[uint]bool)
+	for _, c := range allCaps() {
+		if c.Name == "eth" {
+			ours[c.Version] = true
+		}
+	}
+	var best uint
+	for _, c := range peerCaps {
+		if c.Name == "eth" && ours[c.Version] && c.Version > best {
+			best = c.Version
+		}
+	}
+	if best == 0 {
+		return 63 // fallback
+	}
+	return uint32(best)
+}
