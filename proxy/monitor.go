@@ -43,8 +43,7 @@ type monitorSession struct {
 	propagate   bool
 }
 
-// runMonitorPool consumes discovered nodes and maintains persistent
-// connections, replacing the old probe pool.
+// runMonitorPool consumes discovered nodes and maintains persistent connections.
 func (s *Server) runMonitorPool(ctx context.Context, peerCh <-chan *enode.Node) {
 	maxOutbound := s.cfg.MaxOutbound
 	if maxOutbound <= 0 {

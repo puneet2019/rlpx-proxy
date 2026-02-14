@@ -15,7 +15,7 @@ import (
 // Config holds the proxy server configuration.
 type Config struct {
 	ListenAddr   string            // e.g. ":30303"
-	UpstreamAddr string            // e.g. "xdc-node:30303" (optional for monitor mode)
+	UpstreamAddr string            // e.g. "host:30303" (optional, enables relay proxy mode)
 	NodeKey      *ecdsa.PrivateKey // real node's private key (external side)
 	ProxyKey     *ecdsa.PrivateKey // random key (internal/upstream side)
 	Peers        []*Peer           // outbound peers to actively connect to
@@ -26,11 +26,11 @@ type Config struct {
 	DiscoveryV5Addr string        // UDP listen address for discv5 (e.g. ":30302")
 	Bootnodes       []*enode.Node // bootstrap nodes
 
-	// Monitor mode (replaces probe tier)
+	// Monitor
 	Propagate bool   // forward NewBlock/NewBlockHashes/Txns between peers
 	APIAddr   string // HTTP API listen address (e.g. ":8080")
 
-	// Legacy (only used if UpstreamAddr is set)
+	// Relay proxy (only used if UpstreamAddr is set)
 	UpstreamRPC string // HTTP RPC URL of upstream node
 }
 
