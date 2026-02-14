@@ -16,6 +16,22 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
+// sessionResult describes what happened during a connection attempt.
+type sessionResult int
+
+const (
+	sessionDead     sessionResult = iota // dial failed, handshake failed, etc.
+	sessionTooMany                       // peer responded "too many peers"
+	sessionUseful                        // connected + exchanged useful messages
+	sessionBrief                         // connected but disconnected quickly
+)
+
+const (
+	tooManyRetryDelay = 10 * time.Second  // flat retry for "too many peers"
+	deadRetryDelay    = 30 * time.Second  // initial backoff for dead nodes
+	maxRetryDelay     = 2 * time.Minute   // max backoff cap
+)
+
 // monitorSession manages a persistent connection to a single peer.
 // It performs RLPx + Hello + Status exchange, then enters a keep-alive
 // message loop that responds to protocol messages and broadcasts data.
@@ -83,9 +99,11 @@ func (s *Server) runMonitorPool(ctx context.Context, peerCh <-chan *enode.Node) 
 	}
 }
 
-// connectLoop reconnects to a peer with exponential backoff.
+// connectLoop reconnects to a peer with adaptive retry.
+// "Too many peers" nodes get fast 10s retries (slots open frequently).
+// Dead nodes get exponential backoff: 30s → 45s → ... → 2min.
 func (ms *monitorSession) connectLoop(ctx context.Context, pubkey *ecdsa.PublicKey, addr string, enodePort int, sem chan struct{}) {
-	delay := outboundRetryDelay
+	deadDelay := deadRetryDelay
 	ip, _, _ := net.SplitHostPort(addr)
 
 	// Build port fallback list.
@@ -104,11 +122,14 @@ func (ms *monitorSession) connectLoop(ctx context.Context, pubkey *ecdsa.PublicK
 		default:
 		}
 
-		var connected bool
+		var best sessionResult
 		for _, port := range ports {
 			target := net.JoinHostPort(ip, strconv.Itoa(port))
-			if ms.runSession(ctx, pubkey, target) {
-				connected = true
+			result := ms.runSession(ctx, pubkey, target)
+			if result > best {
+				best = result
+			}
+			if result >= sessionUseful {
 				break
 			}
 		}
@@ -120,8 +141,24 @@ func (ms *monitorSession) connectLoop(ctx context.Context, pubkey *ecdsa.PublicK
 		default:
 		}
 
-		if connected {
-			delay = outboundRetryDelay
+		// Pick retry delay based on what happened.
+		var delay time.Duration
+		switch best {
+		case sessionUseful, sessionBrief:
+			// Was connected — reset dead backoff, retry quickly.
+			deadDelay = deadRetryDelay
+			delay = tooManyRetryDelay
+		case sessionTooMany:
+			// Alive but full — fast retry to catch an open slot.
+			deadDelay = deadRetryDelay
+			delay = tooManyRetryDelay
+		default:
+			// Dead — exponential backoff.
+			delay = deadDelay
+			deadDelay = deadDelay * 3 / 2
+			if deadDelay > maxRetryDelay {
+				deadDelay = maxRetryDelay
+			}
 		}
 
 		// Release semaphore while waiting.
@@ -135,11 +172,6 @@ func (ms *monitorSession) connectLoop(ctx context.Context, pubkey *ecdsa.PublicK
 		case <-timer.C:
 		}
 
-		delay = delay * 3 / 2
-		if delay > outboundMaxRetryDelay {
-			delay = outboundMaxRetryDelay
-		}
-
 		// Re-acquire semaphore.
 		select {
 		case sem <- struct{}{}:
@@ -150,13 +182,13 @@ func (ms *monitorSession) connectLoop(ctx context.Context, pubkey *ecdsa.PublicK
 }
 
 // runSession performs a single connection to a peer: RLPx handshake, Hello,
-// Status exchange, then message loop. Returns true if the session was useful.
-func (ms *monitorSession) runSession(ctx context.Context, pubkey *ecdsa.PublicKey, addr string) bool {
+// Status exchange, then message loop. Returns a result code.
+func (ms *monitorSession) runSession(ctx context.Context, pubkey *ecdsa.PublicKey, addr string) sessionResult {
 	// Phase 1: Dial TCP.
 	tcp, err := net.DialTimeout("tcp", addr, handshakeTimeout)
 	if err != nil {
 		log.Printf("[monitor→%s] dial failed: %v", addr, err)
-		return false
+		return sessionDead
 	}
 	defer tcp.Close()
 
@@ -166,7 +198,7 @@ func (ms *monitorSession) runSession(ctx context.Context, pubkey *ecdsa.PublicKe
 	remotePub, err := conn.Handshake(ms.nodeKey)
 	if err != nil {
 		log.Printf("[monitor→%s] handshake failed: %v", addr, err)
-		return false
+		return sessionDead
 	}
 	tcp.SetDeadline(time.Time{})
 
@@ -183,33 +215,36 @@ func (ms *monitorSession) runSession(ctx context.Context, pubkey *ecdsa.PublicKe
 	helloBytes, err := encodeHello(hello)
 	if err != nil {
 		log.Printf("[monitor→%s] encode hello: %v", addr, err)
-		return false
+		return sessionDead
 	}
 
 	if _, err := conn.Write(HandshakeMsg, helloBytes); err != nil {
 		log.Printf("[monitor→%s] write hello: %v", addr, err)
-		return false
+		return sessionDead
 	}
 
 	code, data, _, err := conn.Read()
 	if err != nil {
 		log.Printf("[monitor→%s] read hello: %v", addr, err)
-		return false
+		return sessionDead
 	}
 	if code == DiscMsg {
 		reason := decodeDisconnectReason(data)
 		log.Printf("[monitor→%s] disconnected during hello: %s", addr, reason)
-		return false
+		if reason == "too many peers" {
+			return sessionTooMany
+		}
+		return sessionDead
 	}
 	if code != HandshakeMsg {
 		log.Printf("[monitor→%s] expected hello, got 0x%02x", addr, code)
-		return false
+		return sessionDead
 	}
 
 	peerHello, err := decodeHello(data)
 	if err != nil {
 		log.Printf("[monitor→%s] decode hello: %v", addr, err)
-		return false
+		return sessionDead
 	}
 
 	conn.SetSnappy(peerHello.Version >= 5)
@@ -230,13 +265,13 @@ func (ms *monitorSession) runSession(ctx context.Context, pubkey *ecdsa.PublicKe
 	code, data, _, err = conn.Read()
 	if err != nil {
 		log.Printf("[monitor→%s] read status: %v", addr, err)
-		return false
+		return sessionBrief
 	}
 
 	if code == DiscMsg {
 		reason := decodeDisconnectReason(data)
 		log.Printf("[monitor→%s] disconnected during status: %s", addr, reason)
-		return false
+		return sessionBrief
 	}
 
 	var peerStatus *EthStatus
@@ -244,7 +279,7 @@ func (ms *monitorSession) runSession(ctx context.Context, pubkey *ecdsa.PublicKe
 		peerStatus, err = decodeStatus(data)
 		if err != nil {
 			log.Printf("[monitor→%s] decode status: %v", addr, err)
-			return false
+			return sessionBrief
 		}
 		setGenesis(peerStatus.Genesis)
 		log.Printf("[monitor→%s] status: net=%d td=%s genesis=%s", addr,
@@ -252,7 +287,7 @@ func (ms *monitorSession) runSession(ctx context.Context, pubkey *ecdsa.PublicKe
 	}
 	if peerStatus == nil {
 		log.Printf("[monitor→%s] expected status, got 0x%02x", addr, code)
-		return false
+		return sessionBrief
 	}
 
 	// Send our Status mirroring the peer's chain state.
@@ -260,12 +295,12 @@ func (ms *monitorSession) runSession(ctx context.Context, pubkey *ecdsa.PublicKe
 	statusBytes, err := encodeStatus(status)
 	if err != nil {
 		log.Printf("[monitor→%s] encode status: %v", addr, err)
-		return false
+		return sessionBrief
 	}
 	conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	if _, err := conn.Write(StatusMsg, statusBytes); err != nil {
 		log.Printf("[monitor→%s] write status: %v", addr, err)
-		return false
+		return sessionBrief
 	}
 
 	// Register with broadcaster for propagation.
@@ -276,7 +311,10 @@ func (ms *monitorSession) runSession(ctx context.Context, pubkey *ecdsa.PublicKe
 	}
 
 	// Phase 5: Message loop.
-	return ms.messageLoop(ctx, conn, addr, peerID, broadcastCh)
+	if ms.messageLoop(ctx, conn, addr, peerID, broadcastCh) {
+		return sessionUseful
+	}
+	return sessionBrief
 }
 
 // messageLoop handles the persistent connection message loop.
