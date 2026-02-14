@@ -76,6 +76,7 @@ func main() {
 	}
 
 	discoveryAddr := envOrDefault("DISCOVERY_ADDR", ":30301")
+	discoveryV5Addr := envOrDefault("DISCOVERY_V5_ADDR", ":30302")
 
 	// Monitor mode config.
 	propagate := true
@@ -97,7 +98,8 @@ func main() {
 		ProxyKey:      proxyKey,
 		Peers:         peers,
 		MaxOutbound:   maxOutbound,
-		DiscoveryAddr: discoveryAddr,
+		DiscoveryAddr:   discoveryAddr,
+		DiscoveryV5Addr: discoveryV5Addr,
 		Bootnodes:     bootnodes,
 		Propagate:     propagate,
 		APIAddr:       apiAddr,

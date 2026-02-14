@@ -1,8 +1,10 @@
+build/
 xdc-data/
 example/
-build/
 .git/
 .env
+.idea/
+.DS_Store
+PLAN.md
 *.json
 *.list
-PLAN.md

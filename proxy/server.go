@@ -22,8 +22,9 @@ type Config struct {
 	MaxOutbound  int               // max concurrent outbound/monitor connections (default 100)
 
 	// Discovery
-	DiscoveryAddr string        // UDP listen address for discv4 (e.g. ":30301")
-	Bootnodes     []*enode.Node // discv4 bootstrap nodes
+	DiscoveryAddr   string        // UDP listen address for discv4 (e.g. ":30301")
+	DiscoveryV5Addr string        // UDP listen address for discv5 (e.g. ":30302")
+	Bootnodes       []*enode.Node // bootstrap nodes
 
 	// Monitor mode (replaces probe tier)
 	Propagate bool   // forward NewBlock/NewBlockHashes/Txns between peers
@@ -82,11 +83,15 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		}
 	}
 	if len(bootnodes) > 0 {
-		discAddr := s.cfg.DiscoveryAddr
-		if discAddr == "" {
-			discAddr = ":30301"
+		v4Addr := s.cfg.DiscoveryAddr
+		if v4Addr == "" {
+			v4Addr = ":30301"
 		}
-		disc, err := NewDiscovery(s.cfg.NodeKey, discAddr, bootnodes)
+		v5Addr := s.cfg.DiscoveryV5Addr
+		if v5Addr == "" {
+			v5Addr = ":30302"
+		}
+		disc, err := NewDiscovery(s.cfg.NodeKey, v4Addr, v5Addr, bootnodes)
 		if err != nil {
 			return fmt.Errorf("discovery: %w", err)
 		}

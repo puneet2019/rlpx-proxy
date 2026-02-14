@@ -13,9 +13,11 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/enode"
 )
 
-// Discovery manages discv4 DHT peer discovery.
+// Discovery manages discv4 + discv5 DHT peer discovery.
 type Discovery struct {
-	disc      *discover.UDPv4
+	v4 *discover.UDPv4
+	v5 *discover.UDPv5 // nil if v5 listen fails (non-fatal)
+
 	localNode *enode.LocalNode
 	db        *enode.DB
 
@@ -23,51 +25,95 @@ type Discovery struct {
 	pool map[enode.ID]*enode.Node // all discovered nodes
 }
 
-// NewDiscovery creates a new discv4 discovery instance that listens for
-// UDP packets on listenAddr and bootstraps from the given bootnodes.
-func NewDiscovery(key *ecdsa.PrivateKey, listenAddr string, bootnodes []*enode.Node) (*Discovery, error) {
+// NewDiscovery creates discv4 and discv5 discovery listeners.
+// discv4 listens on v4Addr, discv5 on v5Addr. Both share the same
+// node identity and bootnode list. discv5 failure is non-fatal.
+func NewDiscovery(key *ecdsa.PrivateKey, v4Addr, v5Addr string, bootnodes []*enode.Node) (*Discovery, error) {
 	db, err := enode.OpenDB("")
 	if err != nil {
 		return nil, err
 	}
 	ln := enode.NewLocalNode(db, key)
 
-	addr, err := net.ResolveUDPAddr("udp", listenAddr)
-	if err != nil {
-		db.Close()
-		return nil, err
-	}
-	udpConn, err := net.ListenUDP("udp", addr)
-	if err != nil {
-		db.Close()
-		return nil, err
-	}
-
 	cfg := discover.Config{
 		PrivateKey: key,
 		Bootnodes:  bootnodes,
 	}
-	disc, err := discover.ListenV4(udpConn, ln, cfg)
+
+	// Start discv4.
+	udp4, err := listenUDP(v4Addr)
 	if err != nil {
-		udpConn.Close()
 		db.Close()
-		return nil, err
+		return nil, fmt.Errorf("discv4 listen: %w", err)
+	}
+	v4, err := discover.ListenV4(udp4, ln, cfg)
+	if err != nil {
+		udp4.Close()
+		db.Close()
+		return nil, fmt.Errorf("discv4: %w", err)
+	}
+	log.Printf("[discovery] discv4 listening on %s with %d bootnodes", v4Addr, len(bootnodes))
+
+	// Start discv5 (non-fatal if it fails).
+	var v5 *discover.UDPv5
+	if v5Addr != "" {
+		udp5, err := listenUDP(v5Addr)
+		if err != nil {
+			log.Printf("[discovery] discv5 listen on %s failed: %v (continuing with v4 only)", v5Addr, err)
+		} else {
+			v5, err = discover.ListenV5(udp5, ln, cfg)
+			if err != nil {
+				udp5.Close()
+				log.Printf("[discovery] discv5 start failed: %v (continuing with v4 only)", err)
+			} else {
+				log.Printf("[discovery] discv5 listening on %s", v5Addr)
+			}
+		}
 	}
 
-	log.Printf("[discovery] listening on %s with %d bootnodes", listenAddr, len(bootnodes))
-
 	return &Discovery{
-		disc:      disc,
+		v4:        v4,
+		v5:        v5,
 		localNode: ln,
 		db:        db,
 		pool:      make(map[enode.ID]*enode.Node),
 	}, nil
 }
 
-// Run continuously walks the DHT and sends newly discovered nodes to peerCh.
+func listenUDP(addr string) (*net.UDPConn, error) {
+	a, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return nil, err
+	}
+	return net.ListenUDP("udp", a)
+}
+
+// Run continuously walks both DHTs and sends newly discovered nodes to peerCh.
 // It blocks until ctx is cancelled.
 func (d *Discovery) Run(ctx context.Context, peerCh chan<- *enode.Node) {
-	iter := d.disc.RandomNodes()
+	var wg sync.WaitGroup
+
+	// Run discv4 iterator.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		d.runIterator(ctx, d.v4.RandomNodes(), "v4", peerCh)
+	}()
+
+	// Run discv5 iterator if available.
+	if d.v5 != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d.runIterator(ctx, d.v5.RandomNodes(), "v5", peerCh)
+		}()
+	}
+
+	wg.Wait()
+}
+
+// runIterator consumes a single discovery iterator and deduplicates into peerCh.
+func (d *Discovery) runIterator(ctx context.Context, iter enode.Iterator, tag string, peerCh chan<- *enode.Node) {
 	defer iter.Close()
 
 	for iter.Next() {
@@ -79,7 +125,7 @@ func (d *Discovery) Run(ctx context.Context, peerCh chan<- *enode.Node) {
 
 		node := iter.Node()
 		if node.TCP() == 0 {
-			continue // skip nodes without a TCP port
+			continue
 		}
 
 		d.mu.Lock()
@@ -93,8 +139,8 @@ func (d *Discovery) Run(ctx context.Context, peerCh chan<- *enode.Node) {
 			continue
 		}
 
-		log.Printf("[discovery] new node: %s @ %s:%d (pool size: %d)",
-			node.ID().TerminalString(), node.IP(), node.TCP(), d.PoolSize())
+		log.Printf("[discovery/%s] new node: %s @ %s:%d (pool size: %d)",
+			tag, node.ID().TerminalString(), node.IP(), node.TCP(), d.PoolSize())
 
 		select {
 		case peerCh <- node:
@@ -104,9 +150,12 @@ func (d *Discovery) Run(ctx context.Context, peerCh chan<- *enode.Node) {
 	}
 }
 
-// Close shuts down the discovery listener and database.
+// Close shuts down all discovery listeners and the database.
 func (d *Discovery) Close() {
-	d.disc.Close()
+	d.v4.Close()
+	if d.v5 != nil {
+		d.v5.Close()
+	}
 	d.db.Close()
 }
 
@@ -133,8 +182,7 @@ func ParseBootnodes(enodes []string) []*enode.Node {
 }
 
 // UpstreamBootnode constructs an enode.Node from the upstream node's public key
-// and address, for use as a discv4 bootstrap node. This lets discovery
-// auto-bootstrap from the upstream XDC node without any explicit bootnode config.
+// and address, for use as a discovery bootstrap node.
 func UpstreamBootnode(nodeKey *ecdsa.PrivateKey, upstreamAddr string) (*enode.Node, error) {
 	host, portStr, err := net.SplitHostPort(upstreamAddr)
 	if err != nil {
@@ -145,7 +193,6 @@ func UpstreamBootnode(nodeKey *ecdsa.PrivateKey, upstreamAddr string) (*enode.No
 		return nil, fmt.Errorf("parse port: %w", err)
 	}
 
-	// Resolve hostname to IP (handles docker hostnames, etc.).
 	ips, err := net.LookupIP(host)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s: %w", host, err)
@@ -158,13 +205,11 @@ func UpstreamBootnode(nodeKey *ecdsa.PrivateKey, upstreamAddr string) (*enode.No
 		}
 	}
 	if ip == nil && len(ips) > 0 {
-		ip = ips[0] // fallback to IPv6
+		ip = ips[0]
 	}
 	if ip == nil {
 		return nil, fmt.Errorf("no IP addresses for %s", host)
 	}
 
-	// The upstream XDC node uses nodeKey's public key as its identity.
-	// TCP and UDP ports are the same for standard Ethereum/XDC nodes.
 	return enode.NewV4(&nodeKey.PublicKey, ip, port, port), nil
 }

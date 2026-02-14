@@ -1,57 +1,31 @@
-# docker-compose.yml for running rlpx-proxy as a standalone peer monitor.
-#
-# The XDC node is optional — the monitor can run standalone with just bootnodes.
+# docker-compose.yml — XDC peer monitor
 #
 # Setup:
-#   1. cd example/
-#   2. cp .env.example .env  (fill in your keys)
-#   3. docker compose up -d --build
+#   cd example && cp .env.example .env   # fill in NODE_P2P_KEY
+#   docker compose up -d --build
 #
-# Standalone (no XDC node):
-#   docker compose up -d --build rlpx-proxy
+# Check:
+#   curl localhost:8080/stats | jq .
+#   curl localhost:8080/peers | jq .
 
 services:
-  xdc-node:
-    build:
-      context: .
-      dockerfile: Dockerfile.xdc-arm64
-    image: xdposchain-arm64:v2.6.8
-    restart: unless-stopped
-    profiles:
-      - with-upstream
-    expose:
-      - "30303/tcp"
-    ports:
-      - "30303:30303/udp"
-      - "8545:8545"
-    environment:
-      - NETWORK=mainnet
-      - PRIVATE_KEY=${ACCOUNT_KEY}
-      - XDC_NODEKEYHEX=${NODE_P2P_KEY}
-      - SYNC_MODE=full
-      - GC_MODE=archive
-    volumes:
-      - xdc-data:/work/xdcchain
-      - ./start-xdc.sh:/work/start.sh:ro
-
   rlpx-proxy:
     build:
       context: ..
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "30303:30303/tcp"
-      - "30301:30301/udp"
-      - "8080:8080"
+      - "30303:30303/tcp"   # P2P listen (inbound peers)
+      - "30301:30301/udp"   # discv4 discovery
+      - "30302:30302/udp"   # discv5 discovery
+      - "8080:8080"         # HTTP API
     environment:
       - NODE_PRIVATE_KEY=${NODE_P2P_KEY}
       - DISCOVERY_ADDR=:30301
+      - DISCOVERY_V5_ADDR=:30302
       - MAX_OUTBOUND=${MAX_OUTBOUND:-100}
       - PROPAGATE=${PROPAGATE:-true}
       - API_ADDR=:8080
       - BOOTNODES_FILE=/bootnodes.txt
     volumes:
       - ./xdc-bootnodes.txt:/bootnodes.txt:ro
-
-volumes:
-  xdc-data:

@@ -1,19 +1,35 @@
-COMPOSE := docker compose -f example/docker-compose.yml
+IMAGE     ?= rlpx-proxy
+TAG       ?= latest
+PLATFORMS ?= linux/amd64,linux/arm64
+COMPOSE   := docker compose -f example/docker-compose.yml
 
-.PHONY: build clean up down logs peers stats export rebuild
+.PHONY: build clean test \
+        docker-build docker-push docker-buildx \
+        up down logs logs-proxy rebuild \
+        stats peers export
 
-# ── Build ────────────────────────────────────────────────────────────
+# ── Local build ──────────────────────────────────────────────────────
 build:
-	go build -o ./build/rlpx-proxy ./cmd/rlpx-proxy
-	go build -o ./build/rlpx-monitor ./cmd/rlpx-monitor
+	@mkdir -p build
+	go build -trimpath -o ./build/rlpx-proxy ./cmd/rlpx-proxy
 
 clean:
 	rm -rf build/
 
-rebuild: build
-	$(COMPOSE) up -d --build rlpx-proxy
+test:
+	go vet ./...
 
-# ── Docker Compose ───────────────────────────────────────────────────
+# ── Docker ───────────────────────────────────────────────────────────
+docker-build:
+	docker build -t $(IMAGE):$(TAG) .
+
+docker-push: docker-build
+	docker push $(IMAGE):$(TAG)
+
+docker-buildx:
+	docker buildx build --platform $(PLATFORMS) -t $(IMAGE):$(TAG) --push .
+
+# ── Docker Compose (example/) ───────────────────────────────────────
 up:
 	$(COMPOSE) up -d --build
 
@@ -26,15 +42,15 @@ logs:
 logs-proxy:
 	$(COMPOSE) logs -f --tail=50 rlpx-proxy
 
-# ── API ──────────────────────────────────────────────────────────────
-# Network stats (total peers, connected, best block, DHT pool)
+rebuild: build
+	$(COMPOSE) up -d --build rlpx-proxy
+
+# ── API helpers ──────────────────────────────────────────────────────
 stats:
 	@curl -s localhost:8080/stats | python3 -m json.tool
 
-# All peers with scores, chain head, latency, client
 peers:
 	@curl -s localhost:8080/peers | python3 -m json.tool
 
-# Export enode list of peers above min score
 export:
 	@curl -s 'localhost:8080/peers/export?min_score=20' | python3 -m json.tool

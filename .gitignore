@@ -1,20 +1,18 @@
 # Build artifacts
 build/
 /rlpx-proxy
-/rlpx-monitor
 
-# Chain data (large)
+# Chain data
 xdc-data/
 
 # Secrets
 .env
+example/.env
 
-# Generated data files (use example/ for samples)
+# Generated data
 /peers.json
 /good-peers.json
 /static-nodes.json
-/static-nodes-full.json
-/bootnodes.list
 
 # IDE
 .idea/
