@@ -18,6 +18,7 @@ clean:
 
 test:
 	go vet ./...
+	go test -v -count=1 -short ./...
 
 # ── Docker ───────────────────────────────────────────────────────────
 docker-build:
