@@ -1,3 +1,4 @@
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/puneet2019/rlpx-proxy)
 # rlpx-proxy
 
 A standalone P2P gossip layer for the [XDC Network](https://xinfin.org). It speaks the RLPx/devp2p protocol natively — no XDC node required — to discover, connect to, and monitor every reachable peer on the network. It extends gossip across the protocol by relaying blocks, transactions, and consensus messages between peers, without storing any chain data.
