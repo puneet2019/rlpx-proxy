@@ -283,16 +283,16 @@ func (ms *monitorSession) runSession(ctx context.Context, pubkey *ecdsa.PublicKe
 			log.Printf("[monitor→%s] decode status: %v", addr, err)
 			return sessionBrief
 		}
-		setGenesis(peerStatus.Genesis)
-		log.Printf("[monitor→%s] status: net=%d td=%s genesis=%s", addr,
-			peerStatus.NetworkID, peerStatus.TD, peerStatus.Genesis.Hex()[:10])
+		updateChainState(peerStatus)
+		log.Printf("[monitor→%s] status: net=%d td=%s genesis=%s head=%s", addr,
+			peerStatus.NetworkID, peerStatus.TD, peerStatus.Genesis.Hex()[:10], peerStatus.Head.Hex()[:10])
 	}
 	if peerStatus == nil {
 		log.Printf("[monitor→%s] expected status, got 0x%02x", addr, code)
 		return sessionBrief
 	}
 
-	// Send our Status mirroring the peer's chain state.
+	// Send our Status using the best known chain state.
 	status := makeStatus(ethVersion, peerStatus)
 	statusBytes, err := encodeStatus(status)
 	if err != nil {
@@ -375,9 +375,9 @@ func (ms *monitorSession) messageLoop(ctx context.Context, conn *rlpx.Conn, addr
 			return useful
 
 		case StatusMsg:
-			// Late Status (some peers send it twice).
-			if peerStatus, err := decodeStatus(data); err == nil {
-				setGenesis(peerStatus.Genesis)
+			// Late Status (some peers send it twice) — update chain state for our Status ads.
+			if s, err := decodeStatus(data); err == nil {
+				updateChainState(s)
 			}
 
 		case NewBlockMsg:
@@ -386,6 +386,9 @@ func (ms *monitorSession) messageLoop(ctx context.Context, conn *rlpx.Conn, addr
 			if cached {
 				ms.store.RecordHead(addr, blockNum, blockHash)
 				log.Printf("[monitor→%s] new block #%d %s", addr, blockNum, blockHash.Hex()[:10])
+				// Update best chain state with the new block's TD.
+				td := ParseNewBlockTD(data)
+				updateChainHead(blockHash, td)
 			}
 			ms.broadcaster.Broadcast(BroadcastMsg{
 				Code: NewBlockMsg, Data: data, Sender: addr,

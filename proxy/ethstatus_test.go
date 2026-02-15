@@ -45,6 +45,9 @@ func TestStatusRoundTrip(t *testing.T) {
 }
 
 func TestMakeStatusMirrorsPeer(t *testing.T) {
+	// Reset global chain state for this test.
+	resetChainState()
+
 	peer := &EthStatus{
 		ProtocolVersion: 100,
 		NetworkID:       50,
@@ -53,6 +56,7 @@ func TestMakeStatusMirrorsPeer(t *testing.T) {
 		Genesis:         common.HexToHash("0x112233"),
 	}
 
+	// No chain state learned yet — should mirror peer.
 	ours := makeStatus(100, peer)
 
 	if ours.ProtocolVersion != 100 {
@@ -69,6 +73,43 @@ func TestMakeStatusMirrorsPeer(t *testing.T) {
 	}
 	if ours.Genesis != peer.Genesis {
 		t.Errorf("Genesis mismatch")
+	}
+}
+
+func TestMakeStatusUsesBestChainState(t *testing.T) {
+	resetChainState()
+
+	// Learn chain state from a "good" peer.
+	good := &EthStatus{
+		ProtocolVersion: 100,
+		NetworkID:       50,
+		TD:              big.NewInt(999999),
+		Head:            common.HexToHash("0xbesthead"),
+		Genesis:         common.HexToHash("0x112233"),
+	}
+	updateChainState(good)
+
+	// Now connect to a peer with lower TD.
+	weaker := &EthStatus{
+		ProtocolVersion: 100,
+		NetworkID:       50,
+		TD:              big.NewInt(100000),
+		Head:            common.HexToHash("0xoldhead"),
+		Genesis:         common.HexToHash("0x112233"),
+	}
+
+	ours := makeStatus(100, weaker)
+
+	// Should use the best known state, not the weaker peer's.
+	if ours.TD.Cmp(good.TD) != 0 {
+		t.Errorf("TD = %s, want %s (best known)", ours.TD, good.TD)
+	}
+	if ours.Head != good.Head {
+		t.Errorf("Head = %s, want %s (best known)", ours.Head, good.Head)
+	}
+	// NetworkID should come from the peer we're connecting to.
+	if ours.NetworkID != weaker.NetworkID {
+		t.Errorf("NetworkID = %d, want %d", ours.NetworkID, weaker.NetworkID)
 	}
 }
 

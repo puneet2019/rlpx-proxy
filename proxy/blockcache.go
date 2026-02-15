@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"math/big"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -113,6 +114,20 @@ func (c *BlockCache) AddNewBlock(data []byte) (uint64, common.Hash, bool) {
 	}
 
 	return blockNum, blockHash, true
+}
+
+// ParseNewBlockTD extracts the total difficulty from a NewBlock message.
+// NewBlock is encoded as: [[header, txs, uncles], td]
+func ParseNewBlockTD(data []byte) *big.Int {
+	var outer []rlp.RawValue
+	if err := rlp.DecodeBytes(data, &outer); err != nil || len(outer) < 2 {
+		return nil
+	}
+	var td big.Int
+	if err := rlp.DecodeBytes(outer[1], &td); err != nil {
+		return nil
+	}
+	return &td
 }
 
 // GetHeaderByHash returns the raw RLP header for a given block hash.
